@@ -17,7 +17,13 @@ export async function GET(req: NextRequest) {
   const apiSecret = process.env.LIVEKIT_API_SECRET;
   const wsUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
 
+  // --- DEBUGGING STEP ---
+  // Log the API Key the server is seeing. We will check this in the Vercel logs.
+  console.log(`Vercel server is using API Key: ${apiKey}`);
+  // --------------------
+
   if (!apiKey || !apiSecret || !wsUrl) {
+    console.error("Server configuration error: One or more environment variables are missing.");
     return NextResponse.json(
       { error: 'Server configuration error' },
       { status: 500 }
