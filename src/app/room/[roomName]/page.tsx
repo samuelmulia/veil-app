@@ -130,8 +130,8 @@ await newRoom.localParticipant.setMicrophoneEnabled(true);
             recognition.interimResults = true;
             recognition.lang = 'en-US'; // Can be changed for other languages
 
-            // FIX: Added 'SpeechRecognitionEvent' type to the event parameter
-            recognition.onresult = (event: SpeechRecognitionEvent) => {
+            // FIX: Changed type to 'any' to resolve build error
+            recognition.onresult = (event: any) => {
                 let interimTranscript = '';
                 let finalTranscript = '';
 
