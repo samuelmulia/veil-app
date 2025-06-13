@@ -171,7 +171,8 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                 if (finalTranscript && room) {
                     const encoder = new TextEncoder();
                     const data = encoder.encode(JSON.stringify({ text: finalTranscript }));
-                    room.localParticipant.publishData(data, { kind: DataPacket_Kind.RELIABLE });
+                    // FIX: Use the 'reliable' property for sending reliable data packets.
+                    room.localParticipant.publishData(data, { reliable: true });
                 }
             };
             
