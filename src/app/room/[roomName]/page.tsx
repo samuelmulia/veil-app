@@ -48,13 +48,9 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [speakingParticipants, setSpeakingParticipants] = useState<Participant[]>([]);
     const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Disconnected);
-    const [isRecognizing, setIsRecognizing] = useState(false);
     const [connectionError, setConnectionError] = useState<string | null>(null);
 
     const audioContainerRef = useRef<HTMLDivElement>(null);
-    const recognitionRef = useRef<any>(null);
-    const router = useRouter();
-    const roomName = params.roomName;
 
     const handleTrackSubscribed = (track: RemoteTrack) => {
         if (track.kind === 'audio') {
@@ -66,6 +62,9 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const handleTrackUnsubscribed = (track: RemoteTrack) => {
         track.detach().forEach(element => element.remove());
     };
+
+    const router = useRouter();
+    const roomName = params.roomName;
 
     // --- LiveKit Connection Logic ---
     const handleEnterRoom = async () => {
@@ -149,71 +148,72 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     useEffect(() => {
         const shouldBeRecognizing = !isInLobby && room && !isMuted && isSubtitlesEnabled;
 
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-            if (shouldBeRecognizing) console.warn("Speech Recognition not supported in this browser.");
+        if (!shouldBeRecognizing) {
             return;
         }
 
-        // If the language changes, we need to stop and destroy the old recognition instance
-        if (recognitionRef.current && recognitionRef.current.lang !== selectedLanguage) {
-            recognitionRef.current.stop();
-            recognitionRef.current = null;
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            console.warn("Speech Recognition not supported in this browser.");
+            return;
         }
 
-        if (!recognitionRef.current) {
-            const recognition = new SpeechRecognition();
-            recognition.continuous = true;
-            recognition.interimResults = true;
-            recognition.lang = selectedLanguage; // Use selected language
+        const recognition = new SpeechRecognition();
+        recognition.lang = selectedLanguage;
+        recognition.continuous = true;
+        recognition.interimResults = true;
 
-            recognition.onstart = () => setIsRecognizing(true);
-            recognition.onend = () => {
-                setIsRecognizing(false);
-                if (!isInLobby && room && !isMuted && isSubtitlesEnabled) {
-                    try { recognition.start(); } catch(e) { console.error("Error restarting speech recognition:", e); }
-                }
-            };
+        recognition.onresult = (event: any) => {
+            let interimTranscript = '';
+            let finalTranscript = '';
 
-            recognition.onresult = (event: any) => {
-                let interimTranscript = '';
-                let finalTranscript = '';
-
-                for (let i = event.resultIndex; i < event.results.length; ++i) {
-                    if (event.results[i].isFinal) {
-                        finalTranscript += event.results[i][0].transcript;
-                    } else {
-                        interimTranscript += event.results[i][0].transcript;
-                    }
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+                if (event.results[i].isFinal) {
+                    finalTranscript += event.results[i][0].transcript;
+                } else {
+                    interimTranscript += event.results[i][0].transcript;
                 }
-                
-                if (interimTranscript.length > 0) {
-                    setActiveSubtitle({ speakerName: 'You', text: interimTranscript });
-                }
-
-                if (finalTranscript && room) {
-                    setActiveSubtitle({ speakerName: 'You', text: finalTranscript });
-                    const encoder = new TextEncoder();
-                    const data = encoder.encode(JSON.stringify({ text: finalTranscript }));
-                    room.localParticipant.publishData(data, { reliable: true });
-                }
-            };
+            }
             
-            recognitionRef.current = recognition;
-        }
+            if (interimTranscript.length > 0) {
+                setActiveSubtitle({ speakerName: 'You', text: interimTranscript });
+            }
 
-        if (shouldBeRecognizing && !isRecognizing) {
-            try { recognitionRef.current.start(); } catch (e) { console.error("Error starting speech recognition:", e); }
-        } else if (!shouldBeRecognizing && isRecognizing) {
-            recognitionRef.current.stop();
-        }
-
-        return () => {
-            if (recognitionRef.current?.stop) {
-                recognitionRef.current.stop();
+            if (finalTranscript && room) {
+                setActiveSubtitle({ speakerName: 'You', text: finalTranscript });
+                const encoder = new TextEncoder();
+                const data = encoder.encode(JSON.stringify({ text: finalTranscript }));
+                room.localParticipant.publishData(data, { reliable: true });
             }
         };
-    }, [isInLobby, room, isMuted, isSubtitlesEnabled, isRecognizing, selectedLanguage]);
+
+        recognition.onend = () => {
+            // Only restart if we are still meant to be recognizing
+            if (!isInLobby && room && !isMuted && isSubtitlesEnabled) {
+                try {
+                    recognition.start();
+                } catch(e) {
+                    console.error("Error restarting speech recognition:", e);
+                }
+            }
+        };
+        
+        recognition.onerror = (event: any) => {
+             console.error("Speech recognition error:", event.error);
+        }
+
+        try {
+            recognition.start();
+        } catch (e) {
+            console.error("Error starting speech recognition:", e);
+        }
+
+        // Cleanup: stop recognition when component unmounts or dependencies change
+        return () => {
+            recognition.stop();
+        };
+
+    }, [isInLobby, room, isMuted, isSubtitlesEnabled, selectedLanguage]);
 
 
     const handleLeaveRoom = useCallback(() => {
