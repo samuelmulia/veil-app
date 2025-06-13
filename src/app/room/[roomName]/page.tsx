@@ -8,11 +8,9 @@ import {
   Participant,
   ConnectionState,
   RemoteTrack,
-  RemoteTrackPublication,
   DataPacket_Kind,
 } from 'livekit-client';
 import { AnimatePresence, motion } from 'framer-motion';
-
 
 // --- Voice Options Data ---
 const voiceOptions = [
@@ -27,7 +25,6 @@ const voiceOptions = [
 type Subtitle = {
     speakerName: string;
     text: string;
-    isFinal: boolean;
 };
 
 // --- Main Page Component ---
@@ -46,6 +43,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Disconnected);
 
     const audioContainerRef = useRef<HTMLDivElement>(null);
+    const recognitionRef = useRef<any>(null); // To hold SpeechRecognition instance
     const router = useRouter();
     const roomName = params.roomName;
 
@@ -58,14 +56,11 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         const newSubtitle: Subtitle = {
             speakerName: participant?.identity || 'Unknown',
             text: data.text,
-            isFinal: data.isFinal,
         };
 
         setActiveSubtitle(newSubtitle);
 
-        if (subtitleTimeoutRef.current) {
-            clearTimeout(subtitleTimeoutRef.current);
-        }
+        if (subtitleTimeoutRef.current) clearTimeout(subtitleTimeoutRef.current);
 
         subtitleTimeoutRef.current = setTimeout(() => {
             setActiveSubtitle(null);
@@ -83,7 +78,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         track.detach().forEach(element => element.remove());
     };
 
-    // --- LiveKit Connection Logic ---
+    // --- LiveKit Connection & Transcription Logic ---
     const handleEnterRoom = async () => {
         const identity = `user-${Math.random().toString(36).substring(7)}`;
         try {
@@ -104,7 +99,8 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 
             const wsUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL!;
             await newRoom.connect(wsUrl, token);
-            await newRoom.localParticipant.setMicrophoneEnabled(!isMuted);
+            await newRoom.localParticipant.setMicrophoneEnabled(true);
+            setIsMuted(false);
 
             setRoom(newRoom);
             updateParticipants(newRoom);
@@ -115,14 +111,78 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         }
     };
 
+    // --- Speech Recognition Logic ---
+    useEffect(() => {
+        if (isInLobby || !room || !isSubtitlesEnabled) {
+            recognitionRef.current?.stop();
+            return;
+        }
+
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            console.warn("Speech Recognition not supported in this browser.");
+            return;
+        }
+
+        if (!recognitionRef.current) {
+            const recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.lang = 'en-US'; // Can be changed for other languages
+
+            recognition.onresult = (event) => {
+                let interimTranscript = '';
+                let finalTranscript = '';
+
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    if (event.results[i].isFinal) {
+                        finalTranscript += event.results[i][0].transcript;
+                    } else {
+                        interimTranscript += event.results[i][0].transcript;
+                    }
+                }
+                
+                // Display interim results for the local user for better UX
+                if(interimTranscript.length > 0) {
+                     setActiveSubtitle({ speakerName: 'You', text: interimTranscript });
+                }
+
+                // When speech is final, broadcast it
+                if (finalTranscript && room) {
+                    const encoder = new TextEncoder();
+                    const data = encoder.encode(JSON.stringify({ text: finalTranscript }));
+                    room.localParticipant.publishData(data, DataPacket_Kind.RELIABLE);
+                }
+            };
+            
+            recognition.onend = () => {
+                // Restart recognition if we are still in the room and unmuted
+                if (room && !isMuted && isSubtitlesEnabled) {
+                    recognition.start();
+                }
+            };
+            
+            recognitionRef.current = recognition;
+        }
+
+        if (!isMuted) {
+            recognitionRef.current.start();
+        } else {
+            recognitionRef.current.stop();
+        }
+
+        return () => {
+            recognitionRef.current?.stop();
+        };
+
+    }, [isInLobby, room, isMuted, isSubtitlesEnabled]);
+
+
     const handleLeaveRoom = useCallback(() => {
+        recognitionRef.current?.stop();
         room?.disconnect();
         router.push('/');
     }, [room, router]);
-
-    useEffect(() => {
-        return () => { room?.disconnect(); };
-    }, [room]);
 
     const updateParticipants = (currentRoom: Room) => {
         setParticipants([currentRoom.localParticipant, ...currentRoom.remoteParticipants.values()]);
@@ -153,7 +213,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     );
 }
 
-// --- UI Components ---
+// --- UI Components (No changes below this line except InCall button) ---
 function Lobby({ roomName, isConnecting, isMuted, toggleMute, selectedVoice, setSelectedVoice, onEnterRoom }: any) {
   const [isCopied, setIsCopied] = useState(false);
   const handleCopy = () => {
