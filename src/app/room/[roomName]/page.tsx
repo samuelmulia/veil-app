@@ -64,7 +64,15 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const handleEnterRoom = async () => {
         setConnectionError(null);
         const identity = `user-${Math.random().toString(36).substring(7)}`;
+        
         try {
+            // --- ROBUST PERMISSIONS FIX ---
+            // First, explicitly get microphone permissions from the user.
+            // This will trigger the browser prompt immediately.
+            // We don't need to use the stream, just confirm we can get it.
+            await navigator.mediaDevices.getUserMedia({ audio: true });
+
+            // Now that we have permission, proceed with LiveKit connection.
             const resp = await fetch(`/api/token?roomName=${roomName}&identity=${identity}`);
             if (!resp.ok) {
                 const errorData = await resp.json().catch(() => ({ message: 'Failed to get access token.' }));
@@ -87,6 +95,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                 throw new Error("LiveKit URL is not configured. Please set NEXT_PUBLIC_LIVEKIT_URL.");
             }
             await newRoom.connect(wsUrl, token);
+            // This call will now succeed because permission has already been granted.
             await newRoom.localParticipant.setMicrophoneEnabled(true);
             setIsMuted(false);
 
@@ -94,7 +103,12 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             updateParticipants(newRoom);
             setIsInLobby(false);
         } catch (error: any) {
-            setConnectionError(error.message);
+            // Catch specific device errors
+            if (error.name === 'NotFoundError' || error.name === 'NotAllowedError') {
+                 setConnectionError('Microphone access denied. Please allow microphone access in your browser settings.');
+            } else {
+                 setConnectionError(error.message);
+            }
             console.error("Error connecting to LiveKit:", error);
         }
     };
