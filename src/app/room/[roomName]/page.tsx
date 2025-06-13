@@ -21,12 +21,6 @@ const voiceOptions = [
     { id: 'spectral', name: 'Spectral' },
 ];
 
-// --- Language Options Data ---
-const languageOptions = [
-    { id: 'en-US', name: 'English' },
-    { id: 'id-ID', name: 'Bahasa Indonesia' },
-];
-
 // --- Types ---
 type Subtitle = {
     speakerName: string;
@@ -38,7 +32,6 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const [isInLobby, setIsInLobby] = useState(true);
     const [isMuted, setIsMuted] = useState(false);
     const [selectedVoice, setSelectedVoice] = useState('original');
-    const [selectedLanguage, setSelectedLanguage] = useState('en-US'); // New state for language
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isSubtitlesEnabled, setIsSubtitlesEnabled] = useState(true);
     const [activeSubtitle, setActiveSubtitle] = useState<Subtitle | null>(null);
@@ -146,17 +139,11 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             return;
         }
 
-        // If the language changes, we need to stop the old recognition instance
-        if (recognitionRef.current && recognitionRef.current.lang !== selectedLanguage) {
-            recognitionRef.current.stop();
-            recognitionRef.current = null;
-        }
-
         if (!recognitionRef.current) {
             const recognition = new SpeechRecognition();
             recognition.continuous = true;
             recognition.interimResults = true;
-            recognition.lang = selectedLanguage; // Use selected language
+            recognition.lang = 'en-US'; // Reverted to English only
 
             recognition.onstart = () => setIsRecognizing(true);
             recognition.onend = () => {
@@ -204,7 +191,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                 recognitionRef.current.stop();
             }
         };
-    }, [isInLobby, room, isMuted, isSubtitlesEnabled, isRecognizing, selectedLanguage]);
+    }, [isInLobby, room, isMuted, isSubtitlesEnabled, isRecognizing]);
 
 
     const handleLeaveRoom = useCallback(() => {
@@ -238,7 +225,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                     isSubtitlesEnabled={isSubtitlesEnabled}
                     onToggleSubtitles={() => setIsSubtitlesEnabled(!isSubtitlesEnabled)}
                     activeSubtitle={activeSubtitle}
-                    {...{ participants, speakingParticipants, localParticipantSid: room?.localParticipant.sid, isMuted, toggleMute, isSettingsOpen, selectedVoice, setSelectedVoice, selectedLanguage, setSelectedLanguage }}
+                    {...{ participants, speakingParticipants, localParticipantSid: room?.localParticipant.sid, isMuted, toggleMute, isSettingsOpen, selectedVoice, setSelectedVoice }}
                 />
             )}
         </>
@@ -301,10 +288,10 @@ function Lobby({ roomName, isConnecting, isMuted, toggleMute, selectedVoice, set
   );
 }
 
-function InCall({ participants, speakingParticipants, localParticipantSid, isMuted, toggleMute, onLeaveRoom, onToggleSettings, isSettingsOpen, selectedVoice, setSelectedVoice, isSubtitlesEnabled, onToggleSubtitles, activeSubtitle, selectedLanguage, setSelectedLanguage }: any) {
+function InCall({ participants, speakingParticipants, localParticipantSid, isMuted, toggleMute, onLeaveRoom, onToggleSettings, isSettingsOpen, selectedVoice, setSelectedVoice, isSubtitlesEnabled, onToggleSubtitles, activeSubtitle }: any) {
     return (
         <div className="relative min-h-screen p-4 md:p-8 flex flex-col items-center justify-center overflow-hidden">
-            {isSettingsOpen && ( <SettingsModal onClose={onToggleSettings} {...{ selectedVoice, setSelectedVoice, selectedLanguage, setSelectedLanguage }} /> )}
+            {isSettingsOpen && ( <SettingsModal onClose={onToggleSettings} {...{ selectedVoice, setSelectedVoice }} /> )}
             <div className="w-full max-w-2xl text-center z-10">
                 <h2 className="text-3xl font-bold mb-8">In Conversation</h2>
                 <div className="space-y-4">
@@ -384,33 +371,13 @@ function VoiceOptions({ selectedVoice, setSelectedVoice }: any) {
     );
 }
 
-function LanguageOptions({ selectedLanguage, setSelectedLanguage }: any) {
-    return (
-        <div className="flex space-x-2">
-            {languageOptions.map((option) => (
-                <button
-                    key={option.id}
-                    onClick={() => setSelectedLanguage(option.id)}
-                    className={`flex-1 py-2 px-4 rounded-lg transition-colors text-sm font-semibold ${selectedLanguage === option.id ? 'bg-white text-black' : 'bg-[#2a2a2a] text-white hover:bg-[#3a3a3a]'}`}
-                >
-                    {option.name}
-                </button>
-            ))}
-        </div>
-    );
-}
-
-function SettingsModal({ onClose, selectedVoice, setSelectedVoice, selectedLanguage, setSelectedLanguage }: any) {
+function SettingsModal({ onClose, selectedVoice, setSelectedVoice }: any) {
     return (
         <div className="fixed inset-0 bg-black bg-opacity-70 z-50 flex items-center justify-center" onClick={onClose}>
             <div className="bg-[#080808] p-8 rounded-2xl border border-[#222] floating-glow w-full max-w-md" onClick={(e) => e.stopPropagation()}>
                 <h3 className="text-lg font-semibold mb-4">Change Voice Effect</h3>
                 <VoiceOptions selectedVoice={selectedVoice} setSelectedVoice={setSelectedVoice} />
-                
-                <h3 className="text-lg font-semibold mb-4 mt-6">Subtitle Language</h3>
-                <LanguageOptions selectedLanguage={selectedLanguage} setSelectedLanguage={setSelectedLanguage} />
-
-                <button onClick={onClose} className="btn-secondary w-full mt-8 py-2 rounded-lg">Close</button>
+                <button onClick={onClose} className="btn-secondary w-full mt-6 py-2 rounded-lg">Close</button>
             </div>
         </div>
     )
