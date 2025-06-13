@@ -41,6 +41,8 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [speakingParticipants, setSpeakingParticipants] = useState<Participant[]>([]);
     const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Disconnected);
+    const [isRecognizing, setIsRecognizing] = useState(false); // State to track recognition status
+    const [connectionError, setConnectionError] = useState<string | null>(null); // State for connection errors
 
     const audioContainerRef = useRef<HTMLDivElement>(null);
     const recognitionRef = useRef<any>(null); // To hold SpeechRecognition instance
@@ -80,10 +82,14 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 
     // --- LiveKit Connection & Transcription Logic ---
     const handleEnterRoom = async () => {
+        setConnectionError(null); // Clear previous errors
         const identity = `user-${Math.random().toString(36).substring(7)}`;
         try {
             const resp = await fetch(`/api/token?roomName=${roomName}&identity=${identity}`);
-            if (!resp.ok) throw new Error('Failed to get access token.');
+            if (!resp.ok) {
+                const errorData = await resp.json().catch(() => ({ message: 'Failed to get access token.' }));
+                throw new Error(errorData.message || 'Failed to get access token.');
+            }
             const { token } = await resp.json();
 
             const newRoom = new Room({ adaptiveStream: true, dynacast: true });
@@ -98,29 +104,29 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                 .on(RoomEvent.DataReceived, handleDataReceived);
 
             const wsUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL!;
+            if (!wsUrl) {
+                throw new Error("LiveKit URL is not configured. Please set NEXT_PUBLIC_LIVEKIT_URL.");
+            }
             await newRoom.connect(wsUrl, token);
-await newRoom.localParticipant.setMicrophoneEnabled(true);
+            await newRoom.localParticipant.setMicrophoneEnabled(true);
             setIsMuted(false);
 
             setRoom(newRoom);
             updateParticipants(newRoom);
             setIsInLobby(false);
-        } catch (error) {
+        } catch (error: any) {
+            setConnectionError(error.message);
             console.error("Error connecting to LiveKit:", error);
-            alert("Failed to connect to the room.");
         }
     };
 
     // --- Speech Recognition Logic ---
     useEffect(() => {
-        if (isInLobby || !room || !isSubtitlesEnabled) {
-            recognitionRef.current?.stop();
-            return;
-        }
+        const shouldBeRecognizing = !isInLobby && room && !isMuted && isSubtitlesEnabled;
 
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SpeechRecognition) {
-            console.warn("Speech Recognition not supported in this browser.");
+            if (shouldBeRecognizing) console.warn("Speech Recognition not supported in this browser.");
             return;
         }
 
@@ -128,9 +134,24 @@ await newRoom.localParticipant.setMicrophoneEnabled(true);
             const recognition = new SpeechRecognition();
             recognition.continuous = true;
             recognition.interimResults = true;
-            recognition.lang = 'en-US'; // Can be changed for other languages
+            recognition.lang = 'en-US';
 
-            // FIX: Changed type to 'any' to resolve build error
+            recognition.onstart = () => {
+                setIsRecognizing(true);
+            };
+
+            recognition.onend = () => {
+                setIsRecognizing(false);
+                // Only restart if it's supposed to be on
+                if (!isInLobby && room && !isMuted && isSubtitlesEnabled) {
+                    try {
+                      recognition.start();
+                    } catch(e) {
+                      console.error("Error restarting speech recognition:", e);
+                    }
+                }
+            };
+
             recognition.onresult = (event: any) => {
                 let interimTranscript = '';
                 let finalTranscript = '';
@@ -143,40 +164,36 @@ await newRoom.localParticipant.setMicrophoneEnabled(true);
                     }
                 }
                 
-                // Display interim results for the local user for better UX
                 if(interimTranscript.length > 0) {
                      setActiveSubtitle({ speakerName: 'You', text: interimTranscript });
                 }
 
-                // When speech is final, broadcast it
                 if (finalTranscript && room) {
                     const encoder = new TextEncoder();
                     const data = encoder.encode(JSON.stringify({ text: finalTranscript }));
-                    room.localParticipant.publishData(data, DataPacket_Kind.RELIABLE);
-                }
-            };
-            
-            recognition.onend = () => {
-                // Restart recognition if we are still in the room and unmuted
-                if (room && !isMuted && isSubtitlesEnabled) {
-                    recognition.start();
+                    room.localParticipant.publishData(data, { kind: DataPacket_Kind.RELIABLE });
                 }
             };
             
             recognitionRef.current = recognition;
         }
 
-        if (!isMuted) {
-            recognitionRef.current.start();
-        } else {
+        if (shouldBeRecognizing && !isRecognizing) {
+            try {
+                recognitionRef.current.start();
+            } catch (e) {
+                console.error("Error starting speech recognition:", e)
+            }
+        } else if (!shouldBeRecognizing && isRecognizing) {
             recognitionRef.current.stop();
         }
 
         return () => {
-            recognitionRef.current?.stop();
+            if (recognitionRef.current && isRecognizing) {
+                recognitionRef.current.stop();
+            }
         };
-
-    }, [isInLobby, room, isMuted, isSubtitlesEnabled]);
+    }, [isInLobby, room, isMuted, isSubtitlesEnabled, isRecognizing]);
 
 
     const handleLeaveRoom = useCallback(() => {
@@ -199,7 +216,11 @@ await newRoom.localParticipant.setMicrophoneEnabled(true);
         <>
             <div ref={audioContainerRef} />
             {isInLobby ? (
-                <Lobby onEnterRoom={handleEnterRoom} {...{ roomName, isConnecting: connectionState === ConnectionState.Connecting, isMuted, toggleMute, selectedVoice, setSelectedVoice }} />
+                <Lobby 
+                  onEnterRoom={handleEnterRoom} 
+                  connectionError={connectionError}
+                  {...{ roomName, isConnecting: connectionState === ConnectionState.Connecting, isMuted, toggleMute, selectedVoice, setSelectedVoice }} 
+                />
             ) : (
                 <InCall
                     onLeaveRoom={handleLeaveRoom}
@@ -214,8 +235,8 @@ await newRoom.localParticipant.setMicrophoneEnabled(true);
     );
 }
 
-// --- UI Components (No changes below this line except InCall button) ---
-function Lobby({ roomName, isConnecting, isMuted, toggleMute, selectedVoice, setSelectedVoice, onEnterRoom }: any) {
+// --- UI Components ---
+function Lobby({ roomName, isConnecting, isMuted, toggleMute, selectedVoice, setSelectedVoice, onEnterRoom, connectionError }: any) {
   const [isCopied, setIsCopied] = useState(false);
   const handleCopy = () => {
     // Use a temporary textarea element to copy text to the clipboard for broader browser support.
@@ -256,6 +277,11 @@ function Lobby({ roomName, isConnecting, isMuted, toggleMute, selectedVoice, set
                 {isMuted ? <MicOffIcon className="w-6 h-6" /> : <MicIcon className="w-6 h-6" />}
               </button>
             </div>
+            {connectionError && (
+              <div className="bg-red-900/50 border border-red-500/50 text-red-200 p-3 rounded-lg mb-4 text-sm text-center">
+                <strong>Connection Failed:</strong> {connectionError}
+              </div>
+            )}
             <button onClick={onEnterRoom} disabled={isConnecting} className="btn-primary w-full font-bold py-4 rounded-xl text-lg disabled:opacity-50 disabled:cursor-not-allowed">
               {isConnecting ? 'Connecting...' : 'Enter Anonymous Room'}
             </button>
