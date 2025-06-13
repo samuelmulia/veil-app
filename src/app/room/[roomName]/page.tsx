@@ -21,6 +21,12 @@ const voiceOptions = [
     { id: 'spectral', name: 'Spectral' },
 ];
 
+// --- Language Options Data ---
+const languageOptions = [
+    { id: 'en-US', name: 'English' },
+    { id: 'id-ID', name: 'Bahasa Indonesia' },
+];
+
 // --- Types ---
 type Subtitle = {
     speakerName: string;
@@ -32,6 +38,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const [isInLobby, setIsInLobby] = useState(true);
     const [isMuted, setIsMuted] = useState(false);
     const [selectedVoice, setSelectedVoice] = useState('original');
+    const [selectedLanguage, setSelectedLanguage] = useState('en-US'); // New state for language
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isSubtitlesEnabled, setIsSubtitlesEnabled] = useState(true);
     const [activeSubtitle, setActiveSubtitle] = useState<Subtitle | null>(null);
@@ -41,33 +48,13 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [speakingParticipants, setSpeakingParticipants] = useState<Participant[]>([]);
     const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Disconnected);
-    const [isRecognizing, setIsRecognizing] = useState(false); // State to track recognition status
-    const [connectionError, setConnectionError] = useState<string | null>(null); // State for connection errors
+    const [isRecognizing, setIsRecognizing] = useState(false);
+    const [connectionError, setConnectionError] = useState<string | null>(null);
 
     const audioContainerRef = useRef<HTMLDivElement>(null);
-    const recognitionRef = useRef<any>(null); // To hold SpeechRecognition instance
+    const recognitionRef = useRef<any>(null);
     const router = useRouter();
     const roomName = params.roomName;
-
-    // --- Data & Track Handling ---
-    const handleDataReceived = (payload: Uint8Array, participant?: Participant) => {
-        if (!isSubtitlesEnabled) return;
-        const decoder = new TextDecoder();
-        const data = JSON.parse(decoder.decode(payload));
-        
-        const newSubtitle: Subtitle = {
-            speakerName: participant?.identity || 'Unknown',
-            text: data.text,
-        };
-
-        setActiveSubtitle(newSubtitle);
-
-        if (subtitleTimeoutRef.current) clearTimeout(subtitleTimeoutRef.current);
-
-        subtitleTimeoutRef.current = setTimeout(() => {
-            setActiveSubtitle(null);
-        }, 5000);
-    };
 
     const handleTrackSubscribed = (track: RemoteTrack) => {
         if (track.kind === 'audio') {
@@ -80,9 +67,9 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         track.detach().forEach(element => element.remove());
     };
 
-    // --- LiveKit Connection & Transcription Logic ---
+    // --- LiveKit Connection Logic ---
     const handleEnterRoom = async () => {
-        setConnectionError(null); // Clear previous errors
+        setConnectionError(null);
         const identity = `user-${Math.random().toString(36).substring(7)}`;
         try {
             const resp = await fetch(`/api/token?roomName=${roomName}&identity=${identity}`);
@@ -100,8 +87,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                 .on(RoomEvent.ParticipantDisconnected, () => updateParticipants(newRoom))
                 .on(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants)
                 .on(RoomEvent.TrackSubscribed, handleTrackSubscribed)
-                .on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed)
-                .on(RoomEvent.DataReceived, handleDataReceived);
+                .on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
 
             const wsUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL!;
             if (!wsUrl) {
@@ -119,6 +105,36 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             console.error("Error connecting to LiveKit:", error);
         }
     };
+    
+    // --- Data (Subtitle) Handling ---
+    useEffect(() => {
+        if (!room) return;
+
+        const handleDataReceived = (payload: Uint8Array, participant?: Participant) => {
+            if (!isSubtitlesEnabled) return;
+            const decoder = new TextDecoder();
+            const data = JSON.parse(decoder.decode(payload));
+            
+            const newSubtitle: Subtitle = {
+                speakerName: participant?.identity || 'Unknown',
+                text: data.text,
+            };
+
+            setActiveSubtitle(newSubtitle);
+
+            if (subtitleTimeoutRef.current) clearTimeout(subtitleTimeoutRef.current);
+
+            subtitleTimeoutRef.current = setTimeout(() => {
+                setActiveSubtitle(null);
+            }, 5000);
+        };
+
+        room.on(RoomEvent.DataReceived, handleDataReceived);
+
+        return () => {
+            room.off(RoomEvent.DataReceived, handleDataReceived);
+        };
+    }, [room, isSubtitlesEnabled]);
 
     // --- Speech Recognition Logic ---
     useEffect(() => {
@@ -130,25 +146,23 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             return;
         }
 
+        // If the language changes, we need to stop the old recognition instance
+        if (recognitionRef.current && recognitionRef.current.lang !== selectedLanguage) {
+            recognitionRef.current.stop();
+            recognitionRef.current = null;
+        }
+
         if (!recognitionRef.current) {
             const recognition = new SpeechRecognition();
             recognition.continuous = true;
             recognition.interimResults = true;
-            recognition.lang = 'en-US';
+            recognition.lang = selectedLanguage; // Use selected language
 
-            recognition.onstart = () => {
-                setIsRecognizing(true);
-            };
-
+            recognition.onstart = () => setIsRecognizing(true);
             recognition.onend = () => {
                 setIsRecognizing(false);
-                // Only restart if it's supposed to be on
                 if (!isInLobby && room && !isMuted && isSubtitlesEnabled) {
-                    try {
-                      recognition.start();
-                    } catch(e) {
-                      console.error("Error restarting speech recognition:", e);
-                    }
+                    try { recognition.start(); } catch(e) { console.error("Error restarting speech recognition:", e); }
                 }
             };
 
@@ -164,14 +178,14 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                     }
                 }
                 
-                if(interimTranscript.length > 0) {
-                     setActiveSubtitle({ speakerName: 'You', text: interimTranscript });
+                if (interimTranscript.length > 0) {
+                    setActiveSubtitle({ speakerName: 'You', text: interimTranscript });
                 }
 
                 if (finalTranscript && room) {
+                    setActiveSubtitle({ speakerName: 'You', text: finalTranscript });
                     const encoder = new TextEncoder();
                     const data = encoder.encode(JSON.stringify({ text: finalTranscript }));
-                    // FIX: Use the 'reliable' property for sending reliable data packets.
                     room.localParticipant.publishData(data, { reliable: true });
                 }
             };
@@ -180,25 +194,20 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         }
 
         if (shouldBeRecognizing && !isRecognizing) {
-            try {
-                recognitionRef.current.start();
-            } catch (e) {
-                console.error("Error starting speech recognition:", e)
-            }
+            try { recognitionRef.current.start(); } catch (e) { console.error("Error starting speech recognition:", e); }
         } else if (!shouldBeRecognizing && isRecognizing) {
             recognitionRef.current.stop();
         }
 
         return () => {
-            if (recognitionRef.current && isRecognizing) {
+            if (recognitionRef.current?.stop) {
                 recognitionRef.current.stop();
             }
         };
-    }, [isInLobby, room, isMuted, isSubtitlesEnabled, isRecognizing]);
+    }, [isInLobby, room, isMuted, isSubtitlesEnabled, isRecognizing, selectedLanguage]);
 
 
     const handleLeaveRoom = useCallback(() => {
-        recognitionRef.current?.stop();
         room?.disconnect();
         router.push('/');
     }, [room, router]);
@@ -229,7 +238,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                     isSubtitlesEnabled={isSubtitlesEnabled}
                     onToggleSubtitles={() => setIsSubtitlesEnabled(!isSubtitlesEnabled)}
                     activeSubtitle={activeSubtitle}
-                    {...{ participants, speakingParticipants, localParticipantSid: room?.localParticipant.sid, isMuted, toggleMute, isSettingsOpen, selectedVoice, setSelectedVoice }}
+                    {...{ participants, speakingParticipants, localParticipantSid: room?.localParticipant.sid, isMuted, toggleMute, isSettingsOpen, selectedVoice, setSelectedVoice, selectedLanguage, setSelectedLanguage }}
                 />
             )}
         </>
@@ -240,7 +249,6 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 function Lobby({ roomName, isConnecting, isMuted, toggleMute, selectedVoice, setSelectedVoice, onEnterRoom, connectionError }: any) {
   const [isCopied, setIsCopied] = useState(false);
   const handleCopy = () => {
-    // Use a temporary textarea element to copy text to the clipboard for broader browser support.
     const textArea = document.createElement("textarea");
     textArea.value = window.location.href;
     document.body.appendChild(textArea);
@@ -293,10 +301,10 @@ function Lobby({ roomName, isConnecting, isMuted, toggleMute, selectedVoice, set
   );
 }
 
-function InCall({ participants, speakingParticipants, localParticipantSid, isMuted, toggleMute, onLeaveRoom, onToggleSettings, isSettingsOpen, selectedVoice, setSelectedVoice, isSubtitlesEnabled, onToggleSubtitles, activeSubtitle }: any) {
+function InCall({ participants, speakingParticipants, localParticipantSid, isMuted, toggleMute, onLeaveRoom, onToggleSettings, isSettingsOpen, selectedVoice, setSelectedVoice, isSubtitlesEnabled, onToggleSubtitles, activeSubtitle, selectedLanguage, setSelectedLanguage }: any) {
     return (
         <div className="relative min-h-screen p-4 md:p-8 flex flex-col items-center justify-center overflow-hidden">
-            {isSettingsOpen && ( <SettingsModal onClose={onToggleSettings} {...{ selectedVoice, setSelectedVoice }} /> )}
+            {isSettingsOpen && ( <SettingsModal onClose={onToggleSettings} {...{ selectedVoice, setSelectedVoice, selectedLanguage, setSelectedLanguage }} /> )}
             <div className="w-full max-w-2xl text-center z-10">
                 <h2 className="text-3xl font-bold mb-8">In Conversation</h2>
                 <div className="space-y-4">
@@ -376,13 +384,33 @@ function VoiceOptions({ selectedVoice, setSelectedVoice }: any) {
     );
 }
 
-function SettingsModal({ onClose, selectedVoice, setSelectedVoice }: any) {
+function LanguageOptions({ selectedLanguage, setSelectedLanguage }: any) {
+    return (
+        <div className="flex space-x-2">
+            {languageOptions.map((option) => (
+                <button
+                    key={option.id}
+                    onClick={() => setSelectedLanguage(option.id)}
+                    className={`flex-1 py-2 px-4 rounded-lg transition-colors text-sm font-semibold ${selectedLanguage === option.id ? 'bg-white text-black' : 'bg-[#2a2a2a] text-white hover:bg-[#3a3a3a]'}`}
+                >
+                    {option.name}
+                </button>
+            ))}
+        </div>
+    );
+}
+
+function SettingsModal({ onClose, selectedVoice, setSelectedVoice, selectedLanguage, setSelectedLanguage }: any) {
     return (
         <div className="fixed inset-0 bg-black bg-opacity-70 z-50 flex items-center justify-center" onClick={onClose}>
             <div className="bg-[#080808] p-8 rounded-2xl border border-[#222] floating-glow w-full max-w-md" onClick={(e) => e.stopPropagation()}>
                 <h3 className="text-lg font-semibold mb-4">Change Voice Effect</h3>
                 <VoiceOptions selectedVoice={selectedVoice} setSelectedVoice={setSelectedVoice} />
-                <button onClick={onClose} className="btn-secondary w-full mt-6 py-2 rounded-lg">Close</button>
+                
+                <h3 className="text-lg font-semibold mb-4 mt-6">Subtitle Language</h3>
+                <LanguageOptions selectedLanguage={selectedLanguage} setSelectedLanguage={setSelectedLanguage} />
+
+                <button onClick={onClose} className="btn-secondary w-full mt-8 py-2 rounded-lg">Close</button>
             </div>
         </div>
     )
