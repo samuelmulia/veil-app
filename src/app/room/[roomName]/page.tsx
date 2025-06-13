@@ -99,7 +99,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 
             const wsUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL!;
             await newRoom.connect(wsUrl, token);
-            await newRoom.localParticipant.setMicrophoneEnabled(true);
+await newRoom.localParticipant.setMicrophoneEnabled(true);
             setIsMuted(false);
 
             setRoom(newRoom);
@@ -130,7 +130,8 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             recognition.interimResults = true;
             recognition.lang = 'en-US'; // Can be changed for other languages
 
-            recognition.onresult = (event) => {
+            // FIX: Added 'SpeechRecognitionEvent' type to the event parameter
+            recognition.onresult = (event: SpeechRecognitionEvent) => {
                 let interimTranscript = '';
                 let finalTranscript = '';
 
@@ -217,8 +218,18 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 function Lobby({ roomName, isConnecting, isMuted, toggleMute, selectedVoice, setSelectedVoice, onEnterRoom }: any) {
   const [isCopied, setIsCopied] = useState(false);
   const handleCopy = () => {
-    navigator.clipboard.writeText(window.location.href);
-    setIsCopied(true);
+    // Use a temporary textarea element to copy text to the clipboard for broader browser support.
+    const textArea = document.createElement("textarea");
+    textArea.value = window.location.href;
+    document.body.appendChild(textArea);
+    textArea.select();
+    try {
+        document.execCommand('copy');
+        setIsCopied(true);
+    } catch (err) {
+        console.error('Failed to copy text: ', err);
+    }
+    document.body.removeChild(textArea);
     setTimeout(() => setIsCopied(false), 2000);
   };
   return (
