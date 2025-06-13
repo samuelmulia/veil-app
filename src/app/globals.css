@@ -1,26 +1,76 @@
-@import "tailwindcss";
-
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+    font-family: 'Inter', sans-serif;
+    background-color: #000000;
+    color: #FFFFFF;
+}
+
+.gradient-text {
+    background: linear-gradient(90deg, #FFFFFF 0%, #a0a0a0 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    text-fill-color: transparent;
+}
+
+.gradient-border-active {
+    border: 1px solid;
+    border-image-slice: 1;
+    border-image-source: linear-gradient(90deg, #FFFFFF, #888888);
+    box-shadow: 0 0 15px rgba(255, 255, 255, 0.2);
+}
+
+.btn-primary {
+    @apply bg-white text-black transition-all duration-300 ease-in-out shadow-[0_0_20px_rgba(255,255,255,0.2)];
+}
+
+.btn-primary:hover {
+     @apply transform -translate-y-0.5 bg-[#f0f0f0] shadow-[0_0_30px_rgba(255,255,255,0.3)];
+}
+        
+.btn-secondary {
+    @apply bg-[#1a1a1a] border border-[#333] text-white transition-all duration-300 ease-in-out;
+}
+
+.btn-secondary:hover {
+    @apply bg-[#222] border-[#555];
+}
+
+.control-bar {
+    @apply bg-black/75 backdrop-blur-md border border-[#333];
+}
+        
+.control-btn {
+    @apply bg-[#333] text-white transition-colors duration-200;
+}
+
+.control-btn.active, .control-btn:hover {
+    @apply bg-[#444];
+}
+        
+.control-btn.red {
+    @apply bg-[#d93025];
+}
+        
+.control-btn.red:hover {
+    @apply bg-[#ea4335];
+}
+
+.voice-option.selected {
+    @apply bg-[#2a2a2a] border-l-white;
+}
+        
+.floating-glow {
+    @apply shadow-[0_0_35px_rgba(255,255,255,0.1)];
+}
+        
+.input-field {
+    @apply bg-[#111] border border-[#333];
+}
+        
+.input-field:focus {
+    @apply outline-none border-white shadow-[0_0_10px_rgba(255,255,255,0.2)];
 }
