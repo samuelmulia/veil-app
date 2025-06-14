@@ -157,6 +157,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [connectionError, setConnectionError] = useState<string | null>(null);
     const [voiceNotes, setVoiceNotes] = useState<VoiceNote[]>([]);
+    const [connectionNotification, setConnectionNotification] = useState<string | null>(null);
     
     const [recordingStatus, setRecordingStatus] = useState<'idle' | 'recording' | 'reviewing' | 'sending'>('idle');
     const [lastRecording, setLastRecording] = useState<{ blob: Blob | null, url: string | null }>({ blob: null, url: null });
@@ -203,6 +204,21 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     useEffect(() => {
         if (!room) return;
         const updateParticipantsList = () => setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
+        
+        const showNotification = (message: string) => {
+            setConnectionNotification(message);
+            setTimeout(() => setConnectionNotification(null), 3000);
+        }
+
+        const handleParticipantConnected = (participant: Participant) => {
+            showNotification(`${participant.identity} has joined.`);
+            updateParticipantsList();
+        }
+        const handleParticipantDisconnected = (participant: Participant) => {
+            showNotification(`${participant.identity} has left.`);
+            updateParticipantsList();
+        }
+
         const handleDataReceived = async (payload: Uint8Array, participant?: Participant) => {
             try {
                 const decoder = new TextDecoder();
@@ -223,12 +239,12 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             }
         };
         updateParticipantsList();
-        room.on(RoomEvent.ParticipantConnected, updateParticipantsList);
-        room.on(RoomEvent.ParticipantDisconnected, updateParticipantsList);
+        room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
+        room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
         room.on(RoomEvent.DataReceived, handleDataReceived);
         return () => {
-            room.off(RoomEvent.ParticipantConnected, updateParticipantsList);
-            room.off(RoomEvent.ParticipantDisconnected, updateParticipantsList);
+            room.off(RoomEvent.ParticipantConnected, handleParticipantConnected);
+            room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
             room.off(RoomEvent.DataReceived, handleDataReceived);
         };
     }, [room]);
@@ -311,6 +327,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
 
     return (
         <div className="bg-[#080808] text-white min-h-screen flex flex-col">
+            <ConnectionNotification message={connectionNotification} />
             {isInLobby ? (
                 <Lobby 
                   onEnterRoom={handleEnterRoom} 
@@ -367,6 +384,7 @@ const Lobby = ({ onEnterRoom, connectionError, roomName, isConnecting, selectedV
 
 const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRecording, onStopRecording, onSendNote, onDiscardNote, lastRecordingUrl, onPlayPause, localParticipant }: any) => {
     const reviewPlayerRef = useRef<HTMLAudioElement>(null);
+    const hasPeers = participants.length > 1;
 
     const playReview = () => {
         if(reviewPlayerRef.current) reviewPlayerRef.current.play();
@@ -381,7 +399,14 @@ const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRe
             </header>
             <div className="flex-1 bg-[#111] rounded-2xl p-4 overflow-y-auto mb-6 border border-[#222]">
                 <AnimatePresence>
-                    {voiceNotes.length === 0 && (
+                    {!hasPeers && (
+                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center h-full text-gray-500">
+                            <UsersIcon className="w-16 h-16 mb-4" />
+                            <p className="font-bold">Waiting for others to join...</p>
+                            <p className="text-sm">The room link has been copied to your clipboard.</p>
+                        </motion.div>
+                    )}
+                    {hasPeers && voiceNotes.length === 0 && (
                         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center h-full text-gray-500">
                             <MessageSquareIcon className="w-16 h-16 mb-4" />
                             <p>No voice notes yet. Press the mic to start.</p>
@@ -445,6 +470,25 @@ const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRe
     );
 };
 
+const ConnectionNotification = ({ message }: { message: string | null }) => {
+    return (
+        <AnimatePresence>
+            {message && (
+                <motion.div
+                    initial={{ y: -100, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    exit={{ y: -100, opacity: 0 }}
+                    transition={{ type: "spring", stiffness: 300, damping: 30 }}
+                    className="absolute top-4 left-1/2 -translate-x-1/2 bg-blue-600 text-white px-4 py-2 rounded-lg shadow-lg"
+                >
+                    {message}
+                </motion.div>
+            )}
+        </AnimatePresence>
+    );
+};
+
+
 const VoiceOptions = React.memo(function VoiceOptions({ selectedVoice, setSelectedVoice }: any) {
     return (
         <div className="space-y-2">
@@ -462,6 +506,7 @@ const VoiceOptions = React.memo(function VoiceOptions({ selectedVoice, setSelect
     );
 });
 
+
 // --- SVG Icons ---
 const MicIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"></path> </svg> );
 const PlayIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M8 5v14l11-7z"></path> </svg> );
@@ -470,4 +515,5 @@ const StopIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" 
 const SendIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path> </svg> );
 const XIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"></path> </svg> );
 const MessageSquareIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"></path> </svg> );
+const UsersIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}><path strokeLinecap="round" strokeLinejoin="round" d="M18 18v-5.25m0 0a3 3 0 00-3-3m3 3a3 3 0 00-3-3m-3 3a3 3 0 00-3-3m3 3a3 3 0 00-3-3m-3 3a3 3 0 00-3-3m3 3a3 3 0 00-3-3m0 9.75V18m0-9.75a3 3 0 013-3m-3 3a3 3 0 00-3 3m3-3a3 3 0 013-3m-3 3a3 3 0 00-3 3m6.75 3.375c.621 1.278 1.694 2.34 2.873 3.118a48.455 48.455 0 01-5.746 0c1.179-.778 2.252-1.84 2.873-3.118z"></path></svg>);
 
