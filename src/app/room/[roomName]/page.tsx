@@ -32,11 +32,10 @@ type VoiceNote = {
     timestamp: number;
     isPlaying: boolean;
     status: NoteStatus;
-    effectId: string; // FIX: Added missing property
 };
 
 type Packet = 
-    | { type: 'voice-chunk', noteId: string, chunk: string, index: number, total: number, effectId: string }
+    | { type: 'voice-chunk', noteId: string, chunk: string, index: number, total: number }
     | { type: 'status', status: 'recording' | 'idle' }
     | { type: 'delete-note', noteId: string }
     | { type: 'status-update', noteId: string, status: NoteStatus };
@@ -78,7 +77,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
     const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
-    const receivedChunksRef = useRef<Record<string, { chunks: string[], effectId: string }>>({});
+    const receivedChunksRef = useRef<Record<string, string[]>>({});
     
     const router = useRouter();
     const roomName = params.roomName;
@@ -87,8 +86,8 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         const numOfChan = abuffer.numberOfChannels,
             length = abuffer.length * numOfChan * 2 + 44,
             buffer = new ArrayBuffer(length),
-            view = new DataView(buffer),
-            channels: Float32Array[] = [];
+            view = new DataView(buffer);
+        const channels: Float32Array[] = [];
         let i, sample, offset = 0, pos = 0;
 
         const setUint16 = (data: number) => { view.setUint16(pos, data, true); pos += 2; }
@@ -201,23 +200,22 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                 
                 if (packet.type === 'voice-chunk') {
                     if (!receivedChunksRef.current[packet.noteId]) {
-                        receivedChunksRef.current[packet.noteId] = { chunks: new Array(packet.total), effectId: packet.effectId };
+                        receivedChunksRef.current[packet.noteId] = new Array(packet.total);
                     }
-                    receivedChunksRef.current[packet.noteId].chunks[packet.index] = packet.chunk;
+                    receivedChunksRef.current[packet.noteId][packet.index] = packet.chunk;
 
-                     if (receivedChunksRef.current[packet.noteId].chunks.every(c => c)) {
-                        const noteData = receivedChunksRef.current[packet.noteId];
-                        const fullBase64 = noteData.chunks.join('');
+                     if (receivedChunksRef.current[packet.noteId].every(c => c)) {
+                        const fullBase64 = receivedChunksRef.current[packet.noteId].join('');
                         const audioBuffer = base64ToArrayBuffer(fullBase64);
-                        const audioBlob = new Blob([audioBuffer], { type: 'audio/webm' });
+                        const audioBlob = new Blob([audioBuffer], { type: 'audio/wav' });
+                        const audioUrl = URL.createObjectURL(audioBlob);
                         
                         const newNote: VoiceNote = {
                             id: packet.noteId,
                             sender: { id: participant.sid, name: participant.identity },
-                            audioUrl: URL.createObjectURL(audioBlob), 
-                            timestamp: Date.now(), isPlaying: false,
+                            audioUrl, timestamp: Date.now(), isPlaying: false,
                             status: 'delivered', 
-                            effectId: noteData.effectId,
+                            effectId: packet.effectId,
                         };
                         setVoiceNotes(prev => [newNote, ...prev]);
                         delete receivedChunksRef.current[packet.noteId];
@@ -341,7 +339,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         newAudio.onpause = newAudio.onended = () => {
              setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: false} : n));
         };
-        newAudio.play();
+        newAudio.play().catch(e => console.error("Error playing audio:", e));
     }, [voiceNotes, broadcastPacket]);
     
     const handleDeleteNote = useCallback((noteId: string) => {
@@ -576,4 +574,3 @@ const ShareIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor"
 const TrashIcon = (props: SVGProps<SVGSVGElement>) => (<svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"></path></svg>);
 const CheckIcon = (props: SVGProps<SVGSVGElement>) => (<svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"></path></svg>);
 const CheckDoubleIcon = (props: SVGProps<SVGSVGElement>) => (<svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}><path d="M0.41 13.41L6 19l1.41-1.42L1.83 12 0.41 13.41zM22.41 5.41L12 15.83l-1.41-1.42L21 4 22.41 5.41zM18 7l-1.41-1.42L6 16.17 7.41 17.58 18 7z"></path></svg>);
-
