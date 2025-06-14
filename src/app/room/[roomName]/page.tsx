@@ -11,7 +11,7 @@ import {
   DataPacket_Kind,
   LocalParticipant,
   RemoteParticipant,
-  RemoteTrackPublication, // Import the missing type
+  RemoteTrackPublication,
 } from 'livekit-client';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -187,7 +187,6 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const audioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
     const speechRecognitionRef = useRef<SpeechRecognitionManager | null>(null);
 
-    // Memoize speaking participant SIDs for O(1) lookup
     const speakingSids = useMemo(
         () => new Set(speakingParticipants.map(p => p.sid)),
         [speakingParticipants]
@@ -196,7 +195,6 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const router = useRouter();
     const roomName = params.roomName;
 
-    // Debounced subtitle update
     const updateSubtitle = useMemo(
         () => debounce((subtitle: Subtitle) => {
             setActiveSubtitle(subtitle);
@@ -206,7 +204,6 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         []
     );
 
-    // --- LiveKit Connection Logic ---
     const handleEnterRoom = async () => {
         setConnectionError(null);
         const identity = `user-${Math.random().toString(36).substring(7)}`;
@@ -229,7 +226,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             await newRoom.localParticipant.setMicrophoneEnabled(true);
             setIsMuted(false);
 
-            setRoom(newRoom); // This will trigger the useEffect for event listeners
+            setRoom(newRoom);
             setIsInLobby(false);
         } catch (error: any) {
             console.error("Error connecting to LiveKit:", error);
@@ -246,10 +243,9 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         if (!room) return;
 
         const updateParticipantsList = () => {
-            setParticipants([room.localParticipant, ...room.remoteParticipants.values()]);
+            setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
         };
         
-        // FIX: Added 'publication' parameter to match the expected signature
         const handleTrackSubscribed = (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
             if (track.kind === 'audio') {
                 const audioElement = track.attach();
@@ -259,7 +255,6 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             }
         };
         
-        // FIX: Added 'publication' parameter to match the expected signature
         const handleTrackUnsubscribed = (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
             const trackId = `${participant.sid}-${track.sid}`;
             const audioElement = audioElementsRef.current.get(trackId);
@@ -286,7 +281,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             }
         };
         
-        updateParticipantsList(); // Initial participant list
+        updateParticipantsList();
 
         room.on(RoomEvent.ParticipantConnected, updateParticipantsList);
         room.on(RoomEvent.ParticipantDisconnected, updateParticipantsList);
@@ -362,7 +357,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         setIsMuted(newMutedState);
         room?.localParticipant.setMicrophoneEnabled(!newMutedState).catch(error => {
             console.error('Error toggling microphone:', error);
-            setIsMuted(isMuted); // Revert UI on error
+            setIsMuted(isMuted);
         });
     }, [isMuted, room]);
 
@@ -582,5 +577,4 @@ const SettingsIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stro
 const CopyIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"></path> </svg> );
 const CheckIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path> </svg> );
 const SoundOnIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"></path> </svg> );
-const SubtitlesIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM4 12h4v2H4v-2zm10 6H4v-2h10v2zm6 0h-4v-2h4v2zm0-4H10v-2h10v2z"></path> </svg> );
-
+const SubtitlesIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM4 12h4v2H4v-2zm10 6H4v-2h10v2zm6 0h-4v-2h4v2zm0-4H10v-2h10v2z"></path> </svg>
