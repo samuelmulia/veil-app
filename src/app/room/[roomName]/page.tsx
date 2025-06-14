@@ -9,6 +9,8 @@ import {
   ConnectionState,
   RemoteTrack,
   DataPacket_Kind,
+  LocalParticipant,
+  RemoteParticipant,
 } from 'livekit-client';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -190,30 +192,6 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         [speakingParticipants]
     );
 
-    const handleTrackSubscribed = useCallback((track: RemoteTrack, participant?: Participant) => {
-        if (track.kind === 'audio') {
-            const audioElement = track.attach();
-            const trackId = `${participant?.sid}-${track.sid}`;
-            
-            // Store reference for cleanup
-            audioElementsRef.current.set(trackId, audioElement);
-            audioContainerRef.current?.appendChild(audioElement);
-        }
-    }, []);
-
-    const handleTrackUnsubscribed = useCallback((track: RemoteTrack, participant?: Participant) => {
-        const trackId = `${participant?.sid}-${track.sid}`;
-        const audioElement = audioElementsRef.current.get(trackId);
-        
-        if (audioElement) {
-            audioElement.remove();
-            audioElementsRef.current.delete(trackId);
-        }
-        
-        // Also clean up any detached elements
-        track.detach().forEach(element => element.remove());
-    }, []);
-
     const router = useRouter();
     const roomName = params.roomName;
 
@@ -221,14 +199,8 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const updateSubtitle = useMemo(
         () => debounce((subtitle: Subtitle) => {
             setActiveSubtitle(subtitle);
-            
-            if (subtitleTimeoutRef.current) {
-                clearTimeout(subtitleTimeoutRef.current);
-            }
-            
-            subtitleTimeoutRef.current = setTimeout(() => {
-                setActiveSubtitle(null);
-            }, 5000);
+            if (subtitleTimeoutRef.current) clearTimeout(subtitleTimeoutRef.current);
+            subtitleTimeoutRef.current = setTimeout(() => setActiveSubtitle(null), 5000);
         }, 100),
         []
     );
@@ -239,10 +211,8 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         const identity = `user-${Math.random().toString(36).substring(7)}`;
         
         try {
-            // First, explicitly get microphone permissions from the user.
             await navigator.mediaDevices.getUserMedia({ audio: true });
 
-            // Now that we have permission, proceed with LiveKit connection.
             const resp = await fetch(`/api/token?roomName=${roomName}&identity=${identity}`);
             if (!resp.ok) {
                 const errorData = await resp.json().catch(() => ({ message: 'Failed to get access token.' }));
@@ -251,90 +221,89 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             const { token } = await resp.json();
 
             const newRoom = new Room({ adaptiveStream: true, dynacast: true });
-
-            // Use bound functions to ensure proper cleanup
-            const boundHandlers = {
-                connectionStateChanged: (state: ConnectionState) => setConnectionState(state),
-                participantConnected: () => updateParticipants(newRoom),
-                participantDisconnected: () => updateParticipants(newRoom),
-                activeSpeakersChanged: (speakers: Participant[]) => setSpeakingParticipants(speakers),
-                trackSubscribed: (track: RemoteTrack, publication: any, participant: Participant) => 
-                    handleTrackSubscribed(track, participant),
-                trackUnsubscribed: (track: RemoteTrack, publication: any, participant: Participant) => 
-                    handleTrackUnsubscribed(track, participant),
-            };
-
-            newRoom
-                .on(RoomEvent.ConnectionStateChanged, boundHandlers.connectionStateChanged)
-                .on(RoomEvent.ParticipantConnected, boundHandlers.participantConnected)
-                .on(RoomEvent.ParticipantDisconnected, boundHandlers.participantDisconnected)
-                .on(RoomEvent.ActiveSpeakersChanged, boundHandlers.activeSpeakersChanged)
-                .on(RoomEvent.TrackSubscribed, boundHandlers.trackSubscribed)
-                .on(RoomEvent.TrackUnsubscribed, boundHandlers.trackUnsubscribed);
-
             const wsUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
-            if (!wsUrl) {
-                throw new Error("LiveKit URL is not configured. Please set NEXT_PUBLIC_LIVEKIT_URL.");
-            }
+            if (!wsUrl) throw new Error("LiveKit URL is not configured.");
             
             await newRoom.connect(wsUrl, token);
             await newRoom.localParticipant.setMicrophoneEnabled(true);
             setIsMuted(false);
 
-            setRoom(newRoom);
-            updateParticipants(newRoom);
+            setRoom(newRoom); // This will trigger the useEffect for event listeners
             setIsInLobby(false);
         } catch (error: any) {
             console.error("Error connecting to LiveKit:", error);
-            
             if (error.name === 'NotFoundError' || error.name === 'NotAllowedError') {
-                setConnectionError('Microphone access denied. Please allow microphone access in your browser settings.');
-            } else if (error.name === 'AbortError') {
-                setConnectionError('Connection was aborted. Please try again.');
-            } else if (error.message.includes('network')) {
-                setConnectionError('Network error. Please check your internet connection.');
+                setConnectionError('Microphone access denied. Please allow access in browser settings.');
             } else {
                 setConnectionError(error.message || 'An unexpected error occurred.');
             }
         }
     };
-    
-    // --- Data (Subtitle) Handling ---
+
+    // --- LiveKit Event Handling ---
     useEffect(() => {
         if (!room) return;
 
-        const handleDataReceived = (payload: Uint8Array, participant?: Participant, kind?: DataPacket_Kind) => {
+        const updateParticipantsList = () => {
+            setParticipants([room.localParticipant, ...room.remoteParticipants.values()]);
+        };
+
+        const handleTrackSubscribed = (track: RemoteTrack, participant: RemoteParticipant) => {
+            if (track.kind === 'audio') {
+                const audioElement = track.attach();
+                const trackId = `${participant.sid}-${track.sid}`;
+                audioElementsRef.current.set(trackId, audioElement);
+                audioContainerRef.current?.appendChild(audioElement);
+            }
+        };
+
+        const handleTrackUnsubscribed = (track: RemoteTrack, participant: RemoteParticipant) => {
+            const trackId = `${participant.sid}-${track.sid}`;
+            const audioElement = audioElementsRef.current.get(trackId);
+            if (audioElement) {
+                audioElement.remove();
+                audioElementsRef.current.delete(trackId);
+            }
+            track.detach().forEach(element => element.remove());
+        };
+
+        const handleDataReceived = (payload: Uint8Array, participant?: Participant) => {
             if (!isSubtitlesEnabled) return;
-            
             try {
                 const decoder = new TextDecoder();
                 const data = JSON.parse(decoder.decode(payload));
-                
-                // Validate data structure
-                if (typeof data.text !== 'string') {
-                    console.warn('Invalid subtitle data received');
-                    return;
-                }
-                
-                const newSubtitle: Subtitle = {
+                if (typeof data.text !== 'string') return;
+                updateSubtitle({
                     speakerName: participant?.identity || 'Unknown',
                     text: data.text,
                     timestamp: Date.now()
-                };
-
-                updateSubtitle(newSubtitle);
+                });
             } catch (error) {
                 console.error('Error processing subtitle data:', error);
             }
         };
+        
+        updateParticipantsList(); // Initial participant list
 
+        room.on(RoomEvent.ParticipantConnected, updateParticipantsList);
+        room.on(RoomEvent.ParticipantDisconnected, updateParticipantsList);
+        room.on(RoomEvent.ConnectionStateChanged, setConnectionState);
+        room.on(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
+        room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+        room.on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
         room.on(RoomEvent.DataReceived, handleDataReceived);
 
         return () => {
+            room.off(RoomEvent.ParticipantConnected, updateParticipantsList);
+            room.off(RoomEvent.ParticipantDisconnected, updateParticipantsList);
+            room.off(RoomEvent.ConnectionStateChanged, setConnectionState);
+            room.off(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
+            room.off(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+            room.off(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
             room.off(RoomEvent.DataReceived, handleDataReceived);
         };
     }, [room, isSubtitlesEnabled, updateSubtitle]);
-
+    
     // --- Speech Recognition Logic ---
     useEffect(() => {
         const shouldBeRecognizing = !isInLobby && room && !isMuted && isSubtitlesEnabled;
@@ -344,37 +313,22 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             return;
         }
 
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-            console.warn("Speech Recognition not supported in this browser.");
-            return;
-        }
-
-        // Create or update speech recognition manager
         if (!speechRecognitionRef.current) {
             speechRecognitionRef.current = new SpeechRecognitionManager(
                 selectedLanguage,
-                (text: string, isFinal: boolean) => {
-                    const subtitle: Subtitle = { 
-                        speakerName: 'You', 
-                        text,
-                        timestamp: Date.now()
-                    };
-                    updateSubtitle(subtitle);
-
+                (text, isFinal) => {
+                    updateSubtitle({ speakerName: 'You', text, timestamp: Date.now() });
                     if (isFinal && room) {
                         try {
                             const encoder = new TextEncoder();
                             const data = encoder.encode(JSON.stringify({ text }));
                             room.localParticipant.publishData(data, { reliable: true });
                         } catch (error) {
-                            console.error('Error publishing subtitle data:', error);
+                            console.error('Error publishing data:', error);
                         }
                     }
                 },
-                (error: any) => {
-                    console.error('Speech recognition error:', error);
-                }
+                (error) => console.error('Speech recognition error:', error)
             );
         } else {
             speechRecognitionRef.current.updateLanguage(selectedLanguage);
@@ -382,54 +336,30 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 
         speechRecognitionRef.current.start();
 
-        return () => {
-            speechRecognitionRef.current?.stop();
-        };
+        return () => speechRecognitionRef.current?.stop();
     }, [isInLobby, room, isMuted, isSubtitlesEnabled, selectedLanguage, updateSubtitle]);
 
-    // Cleanup on unmount
+    // --- Component Cleanup ---
     useEffect(() => {
         return () => {
-            // Clean up speech recognition
-            if (speechRecognitionRef.current) {
-                speechRecognitionRef.current.dispose();
-                speechRecognitionRef.current = null;
-            }
-
-            // Clear subtitle timeout
-            if (subtitleTimeoutRef.current) {
-                clearTimeout(subtitleTimeoutRef.current);
-            }
-
-            // Clean up audio elements
-            audioElementsRef.current.forEach(element => element.remove());
+            speechRecognitionRef.current?.dispose();
+            if (subtitleTimeoutRef.current) clearTimeout(subtitleTimeoutRef.current);
+            audioElementsRef.current.forEach(el => el.remove());
             audioElementsRef.current.clear();
-            
-            // Clear audio container
-            if (audioContainerRef.current) {
-                audioContainerRef.current.innerHTML = '';
-            }
-
-            // Disconnect from room
             room?.disconnect();
         };
     }, [room]);
 
     const handleLeaveRoom = useCallback(() => {
-        room?.disconnect();
         router.push('/');
-    }, [room, router]);
-
-    const updateParticipants = useCallback((currentRoom: Room) => {
-        setParticipants([currentRoom.localParticipant, ...currentRoom.remoteParticipants.values()]);
-    }, []);
+    }, [router]);
 
     const toggleMute = useCallback(() => {
         const newMutedState = !isMuted;
         setIsMuted(newMutedState);
         room?.localParticipant.setMicrophoneEnabled(!newMutedState).catch(error => {
             console.error('Error toggling microphone:', error);
-            setIsMuted(!newMutedState); // Revert on error
+            setIsMuted(isMuted); // Revert UI on error
         });
     }, [isMuted, room]);
 
@@ -450,7 +380,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                     onToggleSubtitles={() => setIsSubtitlesEnabled(!isSubtitlesEnabled)}
                     activeSubtitle={activeSubtitle}
                     speakingSids={speakingSids}
-                    {...{ participants, speakingParticipants, localParticipantSid: room?.localParticipant.sid, isMuted, toggleMute, isSettingsOpen, selectedVoice, setSelectedVoice, selectedLanguage, setSelectedLanguage }}
+                    {...{ participants, localParticipantSid: room?.localParticipant.sid, isMuted, toggleMute, isSettingsOpen, selectedVoice, setSelectedVoice, selectedLanguage, setSelectedLanguage }}
                 />
             )}
         </>
