@@ -8,9 +8,6 @@ import {
   Participant,
   ConnectionState,
   DataPacket_Kind,
-  RemoteParticipant,
-  RemoteTrackPublication,
-  RemoteTrack,
 } from 'livekit-client';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -32,17 +29,15 @@ type VoiceNote = {
     isPlaying: boolean;
 };
 
-type VoiceNotePacket = {
-    effectId: string;
-    audioData: string; // Base64 encoded audio data
-};
+type Packet = 
+    | { type: 'voice-note', effectId: string, audioData: string } // Base64 encoded
+    | { type: 'status', status: 'recording' | 'idle' };
 
 // --- Base64 Helpers ---
 function arrayBufferToBase64(buffer: ArrayBuffer) {
     let binary = '';
     const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
+    for (let i = 0; i < bytes.byteLength; i++) {
         binary += String.fromCharCode(bytes[i]);
     }
     return window.btoa(binary);
@@ -119,7 +114,6 @@ function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
     const length = abuffer.length * numOfChan * 2 + 44;
     const buffer = new ArrayBuffer(length);
     const view = new DataView(buffer);
-    const channels: Float32Array[] = [];
     let i, sample, offset = 0, pos = 0;
 
     setUint32(0x46464952); // "RIFF"
@@ -136,7 +130,9 @@ function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
     setUint32(0x61746164); // "data"
     setUint32(length - pos - 4);
 
-    for (i = 0; i < abuffer.numberOfChannels; i++) channels.push(abuffer.getChannelData(i));
+    for (i = 0; i < abuffer.numberOfChannels; i++) {
+        channels.push(abuffer.getChannelData(i));
+    }
 
     while (pos < length) {
         for (i = 0; i < numOfChan; i++) {
@@ -151,6 +147,7 @@ function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
 
     function setUint16(data: number) { view.setUint16(pos, data, true); pos += 2; }
     function setUint32(data: number) { view.setUint32(pos, data, true); pos += 4; }
+    const channels: Float32Array[] = [];
 }
 
 // --- Main Page Component ---
@@ -161,6 +158,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const [connectionError, setConnectionError] = useState<string | null>(null);
     const [voiceNotes, setVoiceNotes] = useState<VoiceNote[]>([]);
     const [connectionNotification, setConnectionNotification] = useState<string | null>(null);
+    const [recordingParticipants, setRecordingParticipants] = useState<Record<string, boolean>>({});
     
     const [recordingStatus, setRecordingStatus] = useState<'idle' | 'recording' | 'reviewing' | 'sending'>('idle');
     const [lastRecording, setLastRecording] = useState<{ blob: Blob | null, url: string | null }>({ blob: null, url: null });
@@ -204,7 +202,6 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         }
     };
     
-    // --- LiveKit Event Handling ---
     useEffect(() => {
         if (!room) return;
         
@@ -213,39 +210,53 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             setTimeout(() => setConnectionNotification(null), 3000);
         }
 
+        const handleParticipantUpdate = () => {
+             setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
+        };
+
         const handleParticipantConnected = (participant: Participant) => {
             showNotification(`${participant.identity} has joined.`);
-            setParticipants(prev => [...prev, participant]);
-        }
+            handleParticipantUpdate();
+        };
+
         const handleParticipantDisconnected = (participant: Participant) => {
             showNotification(`${participant.identity} has left.`);
-            setParticipants(prev => prev.filter(p => p.sid !== participant.sid));
-        }
+            handleParticipantUpdate();
+            setRecordingParticipants(prev => {
+                const newState = {...prev};
+                delete newState[participant.identity];
+                return newState;
+            })
+        };
 
         const handleDataReceived = async (payload: Uint8Array, participant?: Participant) => {
-            console.log("Received data packet from:", participant?.identity);
+            if (!participant) return;
+
             try {
                 const decoder = new TextDecoder();
-                const packet = JSON.parse(decoder.decode(payload)) as VoiceNotePacket;
-                console.log("Parsed packet:", packet);
-
-                const audioBuffer = base64ToArrayBuffer(packet.audioData);
-                const processedBlob = await applyVoiceEffect(audioBuffer, packet.effectId);
-                const audioUrl = URL.createObjectURL(processedBlob);
-                const newNote: VoiceNote = {
-                    id: `vn-${Date.now()}-${Math.random()}`,
-                    sender: participant?.identity || 'Unknown',
-                    audioUrl,
-                    timestamp: Date.now(),
-                    isPlaying: false
-                };
-                setVoiceNotes(prev => [newNote, ...prev]);
+                const packet = JSON.parse(decoder.decode(payload)) as Packet;
+                
+                if(packet.type === 'voice-note'){
+                    const audioBuffer = base64ToArrayBuffer(packet.audioData);
+                    const processedBlob = await applyVoiceEffect(audioBuffer, packet.effectId);
+                    const audioUrl = URL.createObjectURL(processedBlob);
+                    const newNote: VoiceNote = {
+                        id: `vn-${Date.now()}-${Math.random()}`,
+                        sender: participant.identity,
+                        audioUrl,
+                        timestamp: Date.now(),
+                        isPlaying: false
+                    };
+                    setVoiceNotes(prev => [newNote, ...prev]);
+                } else if (packet.type === 'status') {
+                    setRecordingParticipants(prev => ({...prev, [participant.identity]: packet.status === 'recording'}));
+                }
             } catch (error) {
-                console.error('Error processing received voice note:', error);
+                console.error('Error processing received data:', error);
             }
         };
 
-        setParticipants([room.localParticipant, ...room.remoteParticipants.values()]);
+        handleParticipantUpdate();
         room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
         room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
         room.on(RoomEvent.DataReceived, handleDataReceived);
@@ -257,14 +268,28 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         };
     }, [room]);
 
+    const broadcastStatus = useCallback(async (status: 'recording' | 'idle') => {
+        if (!room) return;
+        try {
+            const packet: Packet = { type: 'status', status };
+            const encoder = new TextEncoder();
+            const data = encoder.encode(JSON.stringify(packet));
+            await room.localParticipant.publishData(data, { reliable: true });
+        } catch(error) {
+            console.error("Failed to broadcast status:", error);
+        }
+    }, [room]);
+
     const handleStartRecording = async () => {
         setRecordingStatus('recording');
+        broadcastStatus('recording');
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm' });
             audioChunksRef.current = [];
             mediaRecorderRef.current.ondataavailable = (event) => audioChunksRef.current.push(event.data);
             mediaRecorderRef.current.onstop = () => {
+                broadcastStatus('idle');
                 const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
                 const audioUrl = URL.createObjectURL(audioBlob);
                 setLastRecording({ blob: audioBlob, url: audioUrl });
@@ -276,6 +301,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             console.error("Error starting recording:", error);
             setConnectionError("Could not start recording.");
             setRecordingStatus('idle');
+            broadcastStatus('idle');
         }
     };
 
@@ -288,19 +314,17 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const handleSendNote = async () => {
         if (!lastRecording.blob || !room) return;
         setRecordingStatus('sending');
-        console.log("Preparing to send voice note...");
         try {
             const arrayBuffer = await lastRecording.blob.arrayBuffer();
             const base64Audio = arrayBufferToBase64(arrayBuffer);
-            const packet: VoiceNotePacket = {
+            const packet: Packet = {
+                type: 'voice-note',
                 effectId: selectedVoice,
                 audioData: base64Audio,
             };
             const encoder = new TextEncoder();
             const data = encoder.encode(JSON.stringify(packet));
-            console.log("Publishing data packet...");
             await room.localParticipant.publishData(data, { reliable: true });
-            console.log("Data packet published successfully.");
         } catch (error) {
             console.error("Error sending voice note:", error);
             setConnectionError("Failed to send voice note.");
@@ -315,6 +339,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         if (lastRecording.url) URL.revokeObjectURL(lastRecording.url);
         setLastRecording({ blob: null, url: null });
         setRecordingStatus('idle');
+        broadcastStatus('idle');
     };
 
     const handlePlayPause = (noteId: string) => {
@@ -361,6 +386,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                     lastRecordingUrl={lastRecording.url}
                     onPlayPause={handlePlayPause}
                     localParticipant={room?.localParticipant}
+                    recordingParticipants={recordingParticipants}
                 />
             )}
         </div>
@@ -393,7 +419,7 @@ const Lobby = ({ onEnterRoom, connectionError, roomName, isConnecting, selectedV
   );
 };
 
-const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRecording, onStopRecording, onSendNote, onDiscardNote, lastRecordingUrl, onPlayPause, localParticipant }: any) => {
+const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRecording, onStopRecording, onSendNote, onDiscardNote, lastRecordingUrl, onPlayPause, localParticipant, recordingParticipants }: any) => {
     const reviewPlayerRef = useRef<HTMLAudioElement>(null);
     const hasPeers = participants.length > 1;
 
@@ -406,7 +432,15 @@ const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRe
             <header className="mb-6">
                  <h1 className="text-3xl font-bold text-white">Voice Notes</h1>
                  <p className="text-gray-400">You are <span className="font-mono bg-[#222] px-2 py-1 rounded">{localParticipant?.identity}</span> in room <span className="font-bold text-white">{roomName}</span></p>
-                 <p className="text-gray-400 text-sm mt-2">Participants: {participants.map((p: Participant) => p.identity).join(', ')}</p>
+                 <div className="text-gray-400 text-sm mt-2">
+                    <span className="font-bold">Participants:</span>
+                    {participants.map((p: Participant) => (
+                        <span key={p.sid} className="ml-2">
+                            {p.identity}
+                            {recordingParticipants[p.identity] && <span className="ml-2 text-red-500 font-bold animate-pulse">REC</span>}
+                        </span>
+                    ))}
+                 </div>
             </header>
             <div className="flex-1 bg-[#111] rounded-2xl p-4 overflow-y-auto mb-6 border border-[#222]">
                 <AnimatePresence>
