@@ -251,29 +251,28 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             track.detach().forEach(element => element.remove());
         };
 
-        const handleTrackPublished = (publication: RemoteTrackPublication, participant: RemoteParticipant) => {
-            if (publication.kind === 'audio' && !publication.isSubscribed) {
-                publication.setSubscribed(true);
-            }
-        };
-        
-        updateParticipantsList();
-        
-        room.remoteParticipants.forEach(p => {
-            p.trackPublications.forEach(pub => {
-                if(pub.kind === 'audio' && !pub.isSubscribed) {
-                    (pub as RemoteTrackPublication).setSubscribed(true);
+        const handleParticipantConnected = (participant: RemoteParticipant) => {
+            updateParticipantsList();
+            participant.on(RoomEvent.TrackPublished, (publication) => {
+                if (publication.kind === 'audio') {
+                    publication.setSubscribed(true);
                 }
             });
-        });
+        };
+        
+        const handleParticipantDisconnected = () => {
+            updateParticipantsList();
+        }
 
-        room.on(RoomEvent.ParticipantConnected, updateParticipantsList);
-        room.on(RoomEvent.ParticipantDisconnected, updateParticipantsList);
+        updateParticipantsList();
+        
+        room.remoteParticipants.forEach(handleParticipantConnected);
+        room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
+        room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
         room.on(RoomEvent.ConnectionStateChanged, setConnectionState);
         room.on(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
         room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
         room.on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
-        room.on(RoomEvent.TrackPublished, handleTrackPublished);
 
         return () => {
             room.removeAllListeners();
