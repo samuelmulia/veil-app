@@ -246,7 +246,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 
         const handleTrackPublished = (publication: RemoteTrackPublication, participant: RemoteParticipant) => {
             console.log(`Track published by ${participant.identity}`, publication);
-            if (publication.kind === 'audio') {
+            if (publication.kind === 'audio' && !publication.isSubscribed) {
                 publication.setSubscribed(true);
             }
         };
@@ -255,8 +255,9 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             console.log(`Participant connected: ${participant.identity}`);
             setParticipants(prev => [...prev, participant]);
             
-            participant.tracks.forEach(publication => {
-                if (publication.isSubscribed && publication.track) {
+            // FIX: Use trackPublications instead of tracks
+            participant.trackPublications.forEach(publication => {
+                if ((publication as RemoteTrackPublication).isSubscribed && publication.track) {
                     handleTrackSubscribed(publication.track, publication as RemoteTrackPublication, participant);
                 }
             });
@@ -367,7 +368,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                 <Lobby 
                   onEnterRoom={handleEnterRoom} 
                   connectionError={connectionError}
-                  {...{ roomName, isConnecting: connectionState === ConnectionState.Connecting, isMuted, toggleMute, selectedVoice, setSelectedVoice }} 
+                  {...{ roomName, isConnecting: connectionState === ConnectionState.Connecting, selectedVoice, setSelectedVoice }} 
                 />
             ) : (
                 <InCall
@@ -385,7 +386,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 }
 
 // --- UI Components ---
-const Lobby = React.memo(function Lobby({ roomName, isConnecting, isMuted, toggleMute, selectedVoice, setSelectedVoice, onEnterRoom, connectionError }: any) {
+const Lobby = React.memo(function Lobby({ roomName, isConnecting, selectedVoice, setSelectedVoice, onEnterRoom, connectionError }: any) {
   const [isCopied, setIsCopied] = useState(false);
   const handleCopy = useCallback(() => {
     const textArea = document.createElement("textarea");
@@ -421,11 +422,6 @@ const Lobby = React.memo(function Lobby({ roomName, isConnecting, isMuted, toggl
             <VoiceOptions selectedVoice={selectedVoice} setSelectedVoice={setSelectedVoice} />
           </div>
           <div className="mt-auto">
-            <div className="flex items-center justify-center mb-8">
-              <button onClick={toggleMute} className={`control-btn p-4 rounded-full ${!isMuted ? 'active' : ''}`}>
-                {isMuted ? <MicOffIcon className="w-6 h-6" /> : <MicIcon className="w-6 h-6" />}
-              </button>
-            </div>
             {connectionError && (
               <div className="bg-red-900/50 border border-red-500/50 text-red-200 p-3 rounded-lg mb-4 text-sm text-center">
                 <strong>Connection Failed:</strong> {connectionError}
