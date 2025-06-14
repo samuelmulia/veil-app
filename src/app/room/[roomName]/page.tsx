@@ -24,7 +24,7 @@ const voiceOptions = [
 ];
 
 // --- Types ---
-type NoteStatus = 'sending' | 'sent' | 'delivered' | 'played';
+type NoteStatus = 'sent' | 'delivered' | 'played';
 type VoiceNote = {
     id: string;
     sender: { id: string; name: string };
@@ -32,11 +32,10 @@ type VoiceNote = {
     timestamp: number;
     isPlaying: boolean;
     status: NoteStatus;
-    effectId: string;
 };
 
 type Packet = 
-    | { type: 'voice-chunk', noteId: string, chunk: string, index: number, total: number, effectId: string }
+    | { type: 'voice-chunk', noteId: string, chunk: string, index: number, total: number }
     | { type: 'status', status: 'recording' | 'idle' }
     | { type: 'delete-note', noteId: string }
     | { type: 'status-update', noteId: string, status: NoteStatus };
@@ -71,17 +70,80 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const [connectionNotification, setConnectionNotification] = useState<string | null>(null);
     const [recordingParticipants, setRecordingParticipants] = useState<Record<string, boolean>>({});
     
-    const [recordingStatus, setRecordingStatus] = useState<'idle' | 'recording' | 'reviewing' | 'sending'>('idle');
+    const [recordingStatus, setRecordingStatus] = useState<'idle' | 'recording' | 'reviewing' | 'sending' | 'processing'>('idle');
     const [lastRecording, setLastRecording] = useState<{ blob: Blob | null, url: string | null }>({ blob: null, url: null });
 
     const [selectedVoice, setSelectedVoice] = useState('budi');
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
     const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
-    const receivedChunksRef = useRef<Record<string, { chunks: string[], effectId: string, status: 'receiving' | 'assembling' }>>({});
+    const receivedChunksRef = useRef<Record<string, string[]>>({});
     
     const router = useRouter();
     const roomName = params.roomName;
+
+    const bufferToWav = useCallback((abuffer: AudioBuffer): ArrayBuffer => {
+        const numOfChan = abuffer.numberOfChannels,
+            length = abuffer.length * numOfChan * 2 + 44,
+            buffer = new ArrayBuffer(length),
+            view = new DataView(buffer),
+            channels: Float32Array[] = [];
+        let i, sample, offset = 0, pos = 0;
+
+        const setUint16 = (data: number) => { view.setUint16(pos, data, true); pos += 2; }
+        const setUint32 = (data: number) => { view.setUint32(pos, data, true); pos += 4; }
+
+        setUint32(0x46464952); setUint32(length - 8); setUint32(0x45564157);
+        setUint32(0x20746d66); setUint32(16); setUint16(1); setUint16(numOfChan);
+        setUint32(abuffer.sampleRate); setUint32(abuffer.sampleRate * 2 * numOfChan);
+        setUint16(numOfChan * 2); setUint16(16); setUint32(0x61746164);
+        setUint32(length - pos - 4);
+
+        for (i = 0; i < abuffer.numberOfChannels; i++) channels.push(abuffer.getChannelData(i));
+        
+        while (pos < length) {
+            for (i = 0; i < numOfChan; i++) {
+                sample = Math.max(-1, Math.min(1, channels[i][offset]));
+                sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0;
+                view.setInt16(pos, sample, true);
+                pos += 2;
+            }
+            offset++;
+        }
+        return buffer;
+    }, []);
+
+    const applyVoiceEffect = useCallback(async (audioBlob: Blob, effectId: string): Promise<Blob> => {
+        const audioContext = new AudioContext();
+        const arrayBuffer = await audioBlob.arrayBuffer();
+        const sourceAudioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    
+        const offlineContext = new OfflineAudioContext(
+            sourceAudioBuffer.numberOfChannels,
+            sourceAudioBuffer.length,
+            sourceAudioBuffer.sampleRate
+        );
+    
+        const source = offlineContext.createBufferSource();
+        source.buffer = sourceAudioBuffer;
+        
+        let pitchRate = 1.0;
+        switch (effectId) {
+            case 'budi': pitchRate = 0.85; break;
+            case 'joko': pitchRate = 0.75; break;
+            case 'agung': pitchRate = 0.65; break;
+            case 'citra': pitchRate = 1.4; break;
+            case 'rini': pitchRate = 1.6; break;
+        }
+    
+        source.playbackRate.value = pitchRate;
+        source.connect(offlineContext.destination);
+        source.start(0);
+        const renderedBuffer = await offlineContext.startRendering();
+        
+        const wavBuffer = bufferToWav(renderedBuffer);
+        return new Blob([wavBuffer], { type: 'audio/wav' });
+    }, [bufferToWav]);
     
     const handleEnterRoom = async () => {
         setConnectionError(null);
@@ -114,70 +176,6 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             console.error("Failed to broadcast packet:", error);
         }
     }, [room]);
-
-    const applyVoiceEffect = useCallback(async (audioBlob: Blob, effectId: string): Promise<Blob> => {
-        const audioContext = new AudioContext();
-        const arrayBuffer = await audioBlob.arrayBuffer();
-        const sourceAudioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-    
-        const offlineContext = new OfflineAudioContext(
-            sourceAudioBuffer.numberOfChannels,
-            sourceAudioBuffer.length,
-            sourceAudioBuffer.sampleRate
-        );
-    
-        const source = offlineContext.createBufferSource();
-        source.buffer = sourceAudioBuffer;
-        
-        let pitchRate = 1.0;
-        switch (effectId) {
-            case 'budi': pitchRate = 0.85; break;
-            case 'joko': pitchRate = 0.75; break;
-            case 'agung': pitchRate = 0.65; break;
-            case 'citra': pitchRate = 1.4; break;
-            case 'rini': pitchRate = 1.6; break;
-        }
-    
-        source.playbackRate.value = pitchRate;
-        source.connect(offlineContext.destination);
-        source.start(0);
-        const renderedBuffer = await offlineContext.startRendering();
-        
-        // Simplified encoding to WAV
-        const wavBuffer = bufferToWav(renderedBuffer);
-        return new Blob([wavBuffer], { type: 'audio/wav' });
-    }, []);
-
-    const bufferToWav = (abuffer: AudioBuffer): ArrayBuffer => {
-         const numOfChan = abuffer.numberOfChannels,
-            length = abuffer.length * numOfChan * 2 + 44,
-            buffer = new ArrayBuffer(length),
-            view = new DataView(buffer),
-            channels: Float32Array[] = [];
-        let i, sample, offset = 0, pos = 0;
-
-        const setUint16 = (data: number) => { view.setUint16(pos, data, true); pos += 2; }
-        const setUint32 = (data: number) => { view.setUint32(pos, data, true); pos += 4; }
-
-        setUint32(0x46464952); setUint32(length - 8); setUint32(0x45564157);
-        setUint32(0x20746d66); setUint32(16); setUint16(1); setUint16(numOfChan);
-        setUint32(abuffer.sampleRate); setUint32(abuffer.sampleRate * 2 * numOfChan);
-        setUint16(numOfChan * 2); setUint16(16); setUint32(0x61746164);
-        setUint32(length - pos - 4);
-
-        for (i = 0; i < abuffer.numberOfChannels; i++) channels.push(abuffer.getChannelData(i));
-        
-        while (pos < length) {
-            for (i = 0; i < numOfChan; i++) {
-                sample = Math.max(-1, Math.min(1, channels[i][offset]));
-                sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0;
-                view.setInt16(pos, sample, true);
-                pos += 2;
-            }
-            offset++;
-        }
-        return buffer;
-    };
     
     useEffect(() => {
         if (!room) return;
@@ -202,27 +200,21 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                 
                 if (packet.type === 'voice-chunk') {
                     if (!receivedChunksRef.current[packet.noteId]) {
-                        receivedChunksRef.current[packet.noteId] = { chunks: new Array(packet.total), effectId: packet.effectId, status: 'receiving' };
+                        receivedChunksRef.current[packet.noteId] = new Array(packet.total);
                     }
-                    receivedChunksRef.current[packet.noteId].chunks[packet.index] = packet.chunk;
+                    receivedChunksRef.current[packet.noteId][packet.index] = packet.chunk;
 
-                     if (receivedChunksRef.current[packet.noteId].chunks.every(c => c)) {
-                        const noteData = receivedChunksRef.current[packet.noteId];
-                        if(noteData.status === 'assembling') return; // Already processing
-                        
-                        noteData.status = 'assembling';
-
-                        const fullBase64 = noteData.chunks.join('');
+                     if (receivedChunksRef.current[packet.noteId].every(c => c)) {
+                        const fullBase64 = receivedChunksRef.current[packet.noteId].join('');
                         const audioBuffer = base64ToArrayBuffer(fullBase64);
-                        const audioBlob = new Blob([audioBuffer], { type: 'audio/webm' });
-                        const processedBlob = await applyVoiceEffect(audioBlob, noteData.effectId);
-                        const audioUrl = URL.createObjectURL(processedBlob);
+                        const audioBlob = new Blob([audioBuffer], { type: 'audio/wav' });
+                        const audioUrl = URL.createObjectURL(audioBlob);
                         
                         const newNote: VoiceNote = {
                             id: packet.noteId,
                             sender: { id: participant.sid, name: participant.identity },
                             audioUrl, timestamp: Date.now(), isPlaying: false,
-                            status: 'delivered', effectId: noteData.effectId
+                            status: 'delivered', effectId: packet.effectId, // Not used by receiver but good for consistency
                         };
                         setVoiceNotes(prev => [newNote, ...prev]);
                         delete receivedChunksRef.current[packet.noteId];
@@ -252,7 +244,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
             room.off(RoomEvent.DataReceived, handleDataReceived);
         };
-    }, [room, broadcastPacket, applyVoiceEffect]);
+    }, [room, broadcastPacket]);
     
     const handleStartRecording = useCallback(async () => {
         setRecordingStatus('recording');
@@ -272,8 +264,6 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             };
             mediaRecorderRef.current.start();
         } catch (error) {
-            console.error("Error starting recording:", error);
-            setConnectionError("Could not start recording.");
             setRecordingStatus('idle');
             broadcastPacket({ type: 'status', status: 'idle' });
         }
@@ -287,24 +277,25 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     
     const handleSendNote = useCallback(async () => {
         if (!lastRecording.blob || !room) return;
-        setRecordingStatus('sending');
+        setRecordingStatus('processing');
         try {
-            const rawAudioBuffer = await lastRecording.blob.arrayBuffer();
+            const processedBlob = await applyVoiceEffect(lastRecording.blob, selectedVoice);
+            const rawAudioBuffer = await processedBlob.arrayBuffer();
+
+            setRecordingStatus('sending');
             const base64Audio = arrayBufferToBase64(rawAudioBuffer);
             const noteId = `vn-${Date.now()}-${room.localParticipant.identity}`;
             const totalChunks = Math.ceil(base64Audio.length / CHUNK_SIZE);
-            const effectId = selectedVoice;
-
+            
             for (let i = 0; i < totalChunks; i++) {
                 const chunk = base64Audio.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-                await broadcastPacket({type: 'voice-chunk', noteId, chunk, index: i, total: totalChunks, effectId});
+                await broadcastPacket({type: 'voice-chunk', noteId, chunk, index: i, total: totalChunks, effectId: selectedVoice});
             }
             
+            const audioUrl = URL.createObjectURL(processedBlob);
             const newNote: VoiceNote = {
-                id: noteId,
-                sender: { id: room.localParticipant.sid, name: 'You' },
-                audioUrl: lastRecording.url!,
-                timestamp: Date.now(), isPlaying: false, status: 'sent', effectId,
+                id: noteId, sender: { id: room.localParticipant.sid, name: 'You' },
+                audioUrl, timestamp: Date.now(), isPlaying: false, status: 'sent', effectId: selectedVoice,
             };
             setVoiceNotes(prev => [newNote, ...prev]);
 
@@ -312,9 +303,10 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             console.error("Error sending voice note:", error);
         } finally {
             setRecordingStatus('idle');
+            if (lastRecording.url) URL.revokeObjectURL(lastRecording.url);
             setLastRecording({ blob: null, url: null });
         }
-    }, [lastRecording, room, selectedVoice, broadcastPacket]);
+    }, [lastRecording.blob, room, selectedVoice, broadcastPacket, applyVoiceEffect]);
 
     const handleDiscardNote = useCallback(() => {
         if (lastRecording.url) URL.revokeObjectURL(lastRecording.url);
@@ -323,7 +315,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         broadcastPacket({ type: 'status', status: 'idle' });
     }, [broadcastPacket]);
 
-    const handlePlayPause = useCallback(async (noteId: string) => {
+    const handlePlayPause = useCallback((noteId: string) => {
         const noteToPlay = voiceNotes.find(n => n.id === noteId);
         if (!noteToPlay) return;
 
@@ -331,12 +323,8 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             audioPlayerRef.current.pause();
             if (audioPlayerRef.current.dataset.noteId === noteId) return;
         }
-
-        const audioBlob = await fetch(noteToPlay.audioUrl).then(r => r.blob());
-        const processedBlob = await applyVoiceEffect(audioBlob, noteToPlay.effectId);
-        const processedUrl = URL.createObjectURL(processedBlob);
         
-        const newAudio = new Audio(processedUrl);
+        const newAudio = new Audio(noteToPlay.audioUrl);
         audioPlayerRef.current = newAudio;
         audioPlayerRef.current.dataset.noteId = noteId;
 
@@ -350,7 +338,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
              setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: false} : n));
         };
         newAudio.play();
-    }, [voiceNotes, broadcastPacket, applyVoiceEffect]);
+    }, [voiceNotes, broadcastPacket]);
     
     const handleDeleteNote = useCallback((noteId: string) => {
         setVoiceNotes(prev => prev.filter(n => n.id !== noteId));
@@ -506,9 +494,8 @@ const InCall = React.memo(({ roomName, participants, voiceNotes, recordingStatus
                         <button onClick={onSendNote} className="bg-green-600 hover:bg-green-500 p-4 rounded-full"><SendIcon className="w-6 h-6 text-white"/></button>
                     </div>
                 )}
-                {recordingStatus === 'sending' && (
-                     <div className="text-gray-400">Sending...</div>
-                )}
+                {recordingStatus === 'processing' && ( <div className="text-gray-400">Processing...</div> )}
+                {recordingStatus === 'sending' && ( <div className="text-gray-400">Sending...</div> )}
             </footer>
              <style jsx>{`
                 .record-btn.idle { background: #1e40af; }
