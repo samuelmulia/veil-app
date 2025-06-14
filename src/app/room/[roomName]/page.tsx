@@ -32,10 +32,11 @@ type VoiceNote = {
     timestamp: number;
     isPlaying: boolean;
     status: NoteStatus;
+    effectId: string; // FIX: Added missing property
 };
 
 type Packet = 
-    | { type: 'voice-chunk', noteId: string, chunk: string, index: number, total: number }
+    | { type: 'voice-chunk', noteId: string, chunk: string, index: number, total: number, effectId: string }
     | { type: 'status', status: 'recording' | 'idle' }
     | { type: 'delete-note', noteId: string }
     | { type: 'status-update', noteId: string, status: NoteStatus };
@@ -77,7 +78,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
     const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
-    const receivedChunksRef = useRef<Record<string, string[]>>({});
+    const receivedChunksRef = useRef<Record<string, { chunks: string[], effectId: string }>>({});
     
     const router = useRouter();
     const roomName = params.roomName;
@@ -200,21 +201,23 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                 
                 if (packet.type === 'voice-chunk') {
                     if (!receivedChunksRef.current[packet.noteId]) {
-                        receivedChunksRef.current[packet.noteId] = new Array(packet.total);
+                        receivedChunksRef.current[packet.noteId] = { chunks: new Array(packet.total), effectId: packet.effectId };
                     }
-                    receivedChunksRef.current[packet.noteId][packet.index] = packet.chunk;
+                    receivedChunksRef.current[packet.noteId].chunks[packet.index] = packet.chunk;
 
-                     if (receivedChunksRef.current[packet.noteId].every(c => c)) {
-                        const fullBase64 = receivedChunksRef.current[packet.noteId].join('');
+                     if (receivedChunksRef.current[packet.noteId].chunks.every(c => c)) {
+                        const noteData = receivedChunksRef.current[packet.noteId];
+                        const fullBase64 = noteData.chunks.join('');
                         const audioBuffer = base64ToArrayBuffer(fullBase64);
-                        const audioBlob = new Blob([audioBuffer], { type: 'audio/wav' });
-                        const audioUrl = URL.createObjectURL(audioBlob);
+                        const audioBlob = new Blob([audioBuffer], { type: 'audio/webm' });
                         
                         const newNote: VoiceNote = {
                             id: packet.noteId,
                             sender: { id: participant.sid, name: participant.identity },
-                            audioUrl, timestamp: Date.now(), isPlaying: false,
-                            status: 'delivered', effectId: packet.effectId, // Not used by receiver but good for consistency
+                            audioUrl: URL.createObjectURL(audioBlob), 
+                            timestamp: Date.now(), isPlaying: false,
+                            status: 'delivered', 
+                            effectId: noteData.effectId,
                         };
                         setVoiceNotes(prev => [newNote, ...prev]);
                         delete receivedChunksRef.current[packet.noteId];
@@ -286,10 +289,11 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             const base64Audio = arrayBufferToBase64(rawAudioBuffer);
             const noteId = `vn-${Date.now()}-${room.localParticipant.identity}`;
             const totalChunks = Math.ceil(base64Audio.length / CHUNK_SIZE);
-            
+            const effectId = selectedVoice;
+
             for (let i = 0; i < totalChunks; i++) {
                 const chunk = base64Audio.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-                await broadcastPacket({type: 'voice-chunk', noteId, chunk, index: i, total: totalChunks, effectId: selectedVoice});
+                await broadcastPacket({type: 'voice-chunk', noteId, chunk, index: i, total: totalChunks, effectId});
             }
             
             const audioUrl = URL.createObjectURL(processedBlob);
