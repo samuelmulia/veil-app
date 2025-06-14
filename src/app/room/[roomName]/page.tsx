@@ -11,6 +11,7 @@ import {
   DataPacket_Kind,
   LocalParticipant,
   RemoteParticipant,
+  RemoteTrackPublication, // Import the missing type
 } from 'livekit-client';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -247,8 +248,9 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         const updateParticipantsList = () => {
             setParticipants([room.localParticipant, ...room.remoteParticipants.values()]);
         };
-
-        const handleTrackSubscribed = (track: RemoteTrack, participant: RemoteParticipant) => {
+        
+        // FIX: Added 'publication' parameter to match the expected signature
+        const handleTrackSubscribed = (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
             if (track.kind === 'audio') {
                 const audioElement = track.attach();
                 const trackId = `${participant.sid}-${track.sid}`;
@@ -256,8 +258,9 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                 audioContainerRef.current?.appendChild(audioElement);
             }
         };
-
-        const handleTrackUnsubscribed = (track: RemoteTrack, participant: RemoteParticipant) => {
+        
+        // FIX: Added 'publication' parameter to match the expected signature
+        const handleTrackUnsubscribed = (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
             const trackId = `${participant.sid}-${track.sid}`;
             const audioElement = audioElementsRef.current.get(trackId);
             if (audioElement) {
