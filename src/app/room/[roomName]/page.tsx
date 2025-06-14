@@ -366,7 +366,7 @@ const InCall = ({ roomName, participants, voiceNotes, isRecording, onStartRecord
                             <p>Press and hold the record button to start.</p>
                         </motion.div>
                     )}
-                    {voiceNotes.map(note => (
+                    {voiceNotes.map((note: VoiceNote) => (
                         <motion.div 
                             key={note.id}
                             initial={{ opacity: 0, y: 20 }}
