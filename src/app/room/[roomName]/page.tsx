@@ -83,7 +83,7 @@ class SpeechRecognitionManager {
 
             if (finalTranscript) {
                 this.onResult(finalTranscript, true);
-                this.restartAttempts = 0; // Reset attempts on successful recognition
+                this.restartAttempts = 0;
             }
         };
 
@@ -251,7 +251,9 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                 const audioElement = track.attach();
                 const trackId = `${participant.sid}-${track.sid}`;
                 audioElementsRef.current.set(trackId, audioElement);
-                audioContainerRef.current?.appendChild(audioElement);
+                if(audioContainerRef.current) {
+                    audioContainerRef.current.appendChild(audioElement);
+                }
             }
         };
         
@@ -348,11 +350,11 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     // --- Component Cleanup ---
     useEffect(() => {
         return () => {
+            room?.disconnect();
             speechRecognitionRef.current?.dispose();
             if (subtitleTimeoutRef.current) clearTimeout(subtitleTimeoutRef.current);
             audioElementsRef.current.forEach(el => el.remove());
             audioElementsRef.current.clear();
-            room?.disconnect();
         };
     }, [room]);
 
