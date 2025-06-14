@@ -231,40 +231,44 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         };
         
         const handleTrackSubscribed = (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
-            if (track.kind === 'audio') {
+            if (track.kind === 'audio' && audioContainerRef.current) {
                 const audioElement = track.attach();
-                const trackId = `${participant.sid}-${track.sid}`;
-                audioElementsRef.current.set(trackId, audioElement);
-                if(audioContainerRef.current) {
-                    audioContainerRef.current.appendChild(audioElement);
-                }
+                audioContainerRef.current.appendChild(audioElement);
+                audioElementsRef.current.set(participant.sid, audioElement);
             }
         };
         
         const handleTrackUnsubscribed = (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
-            const trackId = `${participant.sid}-${track.sid}`;
-            const audioElement = audioElementsRef.current.get(trackId);
-            if (audioElement) {
+             const audioElement = audioElementsRef.current.get(participant.sid);
+             if(audioElement) {
                 audioElement.remove();
-                audioElementsRef.current.delete(trackId);
-            }
-            track.detach().forEach(element => element.remove());
+                audioElementsRef.current.delete(participant.sid);
+             }
         };
 
         const handleParticipantConnected = (participant: RemoteParticipant) => {
             updateParticipantsList();
             participant.on(RoomEvent.TrackPublished, (publication) => {
-                if (publication.kind === 'audio' && !publication.isSubscribed) {
+                if (publication.kind === 'audio') {
                     publication.setSubscribed(true);
                 }
             });
         };
         
+        const handleParticipantDisconnected = (participant: RemoteParticipant) => {
+            updateParticipantsList();
+            const audioElement = audioElementsRef.current.get(participant.sid);
+            if (audioElement) {
+                audioElement.remove();
+                audioElementsRef.current.delete(participant.sid);
+            }
+        };
+
         updateParticipantsList();
         
         room.remoteParticipants.forEach(handleParticipantConnected);
         room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
-        room.on(RoomEvent.ParticipantDisconnected, updateParticipantsList);
+        room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
         room.on(RoomEvent.ConnectionStateChanged, setConnectionState);
         room.on(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
         room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
@@ -272,7 +276,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 
         return () => {
             room.off(RoomEvent.ParticipantConnected, handleParticipantConnected);
-            room.off(RoomEvent.ParticipantDisconnected, updateParticipantsList);
+            room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
             room.off(RoomEvent.ConnectionStateChanged, setConnectionState);
             room.off(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
             room.off(RoomEvent.TrackSubscribed, handleTrackSubscribed);
