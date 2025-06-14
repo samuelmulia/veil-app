@@ -565,22 +565,19 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
             }
         };
         
-        // FIX: This function is updated to be more resilient to new states in the livekit-client library.
         const handleConnectionStateChanged = (state: ConnectionState) => {
-            // This map translates LiveKit's connection state to our simpler app status.
-            const statusMap = {
+            const statusMap: Partial<Record<ConnectionState | string, ConnectionStatus>> = {
                 [ConnectionState.Connected]: 'connected',
                 [ConnectionState.Connecting]: 'connecting',
                 [ConnectionState.Disconnected]: 'disconnected',
                 [ConnectionState.Reconnecting]: 'connecting',
-                // Explicitly handle the state that was causing the build error.
-                ['signal-reconnecting']: 'connecting', 
             };
             
-            // The `state` variable from the enum is a string, so we can use it as a key.
-            // We provide a fallback to 'connecting' for any unknown future states.
-            const newStatus = statusMap[state as keyof typeof statusMap] || 'connecting';
-            setConnectionStatus(newStatus);
+            const newStatus = statusMap[state] || 'connecting';
+
+            // FIX: This type assertion tells TypeScript that we are confident `newStatus`
+            // is one of the allowed literal types in `ConnectionStatus`.
+            setConnectionStatus(newStatus as ConnectionStatus);
         
             if (state === ConnectionState.Disconnected) {
                 showNotification('Disconnected from room');
