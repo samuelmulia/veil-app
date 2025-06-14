@@ -254,28 +254,29 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         const handleParticipantConnected = (participant: RemoteParticipant) => {
             updateParticipantsList();
             participant.on(RoomEvent.TrackPublished, (publication) => {
-                if (publication.kind === 'audio') {
+                if (publication.kind === 'audio' && !publication.isSubscribed) {
                     publication.setSubscribed(true);
                 }
             });
         };
         
-        const handleParticipantDisconnected = () => {
-            updateParticipantsList();
-        }
-
         updateParticipantsList();
         
         room.remoteParticipants.forEach(handleParticipantConnected);
         room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
-        room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
+        room.on(RoomEvent.ParticipantDisconnected, updateParticipantsList);
         room.on(RoomEvent.ConnectionStateChanged, setConnectionState);
         room.on(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
         room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
         room.on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
 
         return () => {
-            room.removeAllListeners();
+            room.off(RoomEvent.ParticipantConnected, handleParticipantConnected);
+            room.off(RoomEvent.ParticipantDisconnected, updateParticipantsList);
+            room.off(RoomEvent.ConnectionStateChanged, setConnectionState);
+            room.off(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
+            room.off(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+            room.off(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
         };
     }, [room]);
     
