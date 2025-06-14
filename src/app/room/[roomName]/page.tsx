@@ -31,8 +31,30 @@ type VoiceNote = {
 
 type VoiceNotePacket = {
     effectId: string;
-    audioBuffer: number[]; // Use a plain array for JSON serialization
+    audioData: string; // Base64 encoded audio data
 };
+
+// --- Base64 Helpers ---
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary);
+}
+
+function base64ToArrayBuffer(base64: string) {
+    const binary_string = window.atob(base64);
+    const len = binary_string.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binary_string.charCodeAt(i);
+    }
+    return bytes.buffer;
+}
+
 
 // --- Audio Processing Utility ---
 async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Promise<Blob> {
@@ -40,7 +62,6 @@ async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Pro
     const sourceAudioBuffer = await audioContext.decodeAudioData(audioBuffer.slice(0));
 
     if (effectId === 'original') {
-        // To ensure consistent format, let's re-encode original as WAV too
         const wavBuffer = bufferToWav(sourceAudioBuffer);
         return new Blob([wavBuffer], { type: 'audio/wav' });
     }
@@ -137,7 +158,6 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const [connectionError, setConnectionError] = useState<string | null>(null);
     const [voiceNotes, setVoiceNotes] = useState<VoiceNote[]>([]);
     
-    // UI State Management
     const [recordingStatus, setRecordingStatus] = useState<'idle' | 'recording' | 'reviewing' | 'sending'>('idle');
     const [lastRecording, setLastRecording] = useState<{ blob: Blob | null, url: string | null }>({ blob: null, url: null });
 
@@ -187,7 +207,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             try {
                 const decoder = new TextDecoder();
                 const packet = JSON.parse(decoder.decode(payload)) as VoiceNotePacket;
-                const audioBuffer = new Uint8Array(packet.audioBuffer).buffer;
+                const audioBuffer = base64ToArrayBuffer(packet.audioData);
                 const processedBlob = await applyVoiceEffect(audioBuffer, packet.effectId);
                 const audioUrl = URL.createObjectURL(processedBlob);
                 const newNote: VoiceNote = {
@@ -246,9 +266,10 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         setRecordingStatus('sending');
         try {
             const arrayBuffer = await lastRecording.blob.arrayBuffer();
+            const base64Audio = arrayBufferToBase64(arrayBuffer);
             const packet: VoiceNotePacket = {
                 effectId: selectedVoice,
-                audioBuffer: Array.from(new Uint8Array(arrayBuffer)),
+                audioData: base64Audio,
             };
             const encoder = new TextEncoder();
             const data = encoder.encode(JSON.stringify(packet));
@@ -258,6 +279,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             setConnectionError("Failed to send voice note.");
         } finally {
             setRecordingStatus('idle');
+            if (lastRecording.url) URL.revokeObjectURL(lastRecording.url);
             setLastRecording({ blob: null, url: null });
         }
     };
@@ -448,3 +470,4 @@ const StopIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" 
 const SendIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path> </svg> );
 const XIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"></path> </svg> );
 const MessageSquareIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"></path> </svg> );
+
