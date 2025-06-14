@@ -18,24 +18,28 @@ const CHUNK_SIZE = 16 * 1024; // 16 KB
 const voiceOptions = [
     { id: 'budi', name: 'Budi' },
     { id: 'joko', name: 'Joko' },
-    { id: 'agung', name: 'Agung (Deep)' },
+    { id: 'agung', name: 'Agung' },
     { id: 'citra', name: 'Citra' },
-    { id: 'rini', name: 'Rini (High)' },
+    { id: 'rini', name: 'Rini' },
 ];
 
 // --- Types ---
+type NoteStatus = 'sent' | 'delivered' | 'played';
 type VoiceNote = {
     id: string;
-    sender: string;
+    sender: { id: string, name: string };
     audioUrl: string;
     timestamp: number;
     isPlaying: boolean;
+    status: NoteStatus;
 };
 
 type Packet = 
-    | { type: 'voice-chunk', noteId: string, chunk: string, index: number, total: number }
-    | { type: 'voice-end', noteId: string, total: number, effectId: string }
-    | { type: 'status', status: 'recording' | 'idle' };
+    | { type: 'voice-chunk', noteId: string, chunk: string, index: number, total: number, effectId: string }
+    | { type: 'voice-end', noteId: string }
+    | { type: 'status', status: 'recording' | 'idle' }
+    | { type: 'delete-note', noteId: string }
+    | { type: 'status-update', noteId: string, status: NoteStatus };
 
 // --- Base64 Helpers ---
 function arrayBufferToBase64(buffer: ArrayBuffer) {
@@ -61,7 +65,7 @@ function base64ToArrayBuffer(base64: string) {
 async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Promise<Blob> {
     const audioContext = new AudioContext();
     const sourceAudioBuffer = await audioContext.decodeAudioData(audioBuffer.slice(0));
-
+    
     const offlineContext = new OfflineAudioContext(
         sourceAudioBuffer.numberOfChannels,
         sourceAudioBuffer.length,
@@ -72,14 +76,13 @@ async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Pro
     source.buffer = sourceAudioBuffer;
     
     let pitchRate = 1.0;
-
     switch (effectId) {
         case 'budi': pitchRate = 0.85; break;
         case 'joko': pitchRate = 0.75; break;
         case 'agung': pitchRate = 0.65; break;
         case 'citra': pitchRate = 1.4; break;
         case 'rini': pitchRate = 1.6; break;
-        default: pitchRate = 1.0; break; // Fallback
+        default: pitchRate = 1.0; break;
     }
 
     source.playbackRate.value = pitchRate;
@@ -99,23 +102,13 @@ function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
     const channels: Float32Array[] = [];
     let i, sample, offset = 0, pos = 0;
 
-    setUint32(0x46464952); // "RIFF"
-    setUint32(length - 8);
-    setUint32(0x45564157); // "WAVE"
-    setUint32(0x20746d66); // "fmt "
-    setUint32(16);
-    setUint16(1);
-    setUint16(numOfChan);
-    setUint32(abuffer.sampleRate);
-    setUint32(abuffer.sampleRate * 2 * numOfChan);
-    setUint16(numOfChan * 2);
-    setUint16(16);
-    setUint32(0x61746164); // "data"
+    setUint32(0x46464952); setUint32(length - 8); setUint32(0x45564157);
+    setUint32(0x20746d66); setUint32(16); setUint16(1); setUint16(numOfChan);
+    setUint32(abuffer.sampleRate); setUint32(abuffer.sampleRate * 2 * numOfChan);
+    setUint16(numOfChan * 2); setUint16(16); setUint32(0x61746164);
     setUint32(length - pos - 4);
 
-    for (i = 0; i < abuffer.numberOfChannels; i++) {
-        channels.push(abuffer.getChannelData(i));
-    }
+    for (i = 0; i < abuffer.numberOfChannels; i++) channels.push(abuffer.getChannelData(i));
 
     while (pos < length) {
         for (i = 0; i < numOfChan; i++) {
@@ -145,7 +138,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const [recordingStatus, setRecordingStatus] = useState<'idle' | 'recording' | 'reviewing' | 'sending'>('idle');
     const [lastRecording, setLastRecording] = useState<{ blob: Blob | null, url: string | null }>({ blob: null, url: null });
 
-    const [selectedVoice, setSelectedVoice] = useState('budi'); // Default to a valid voice
+    const [selectedVoice, setSelectedVoice] = useState('budi');
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
     const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
@@ -162,12 +155,9 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             await navigator.mediaDevices.getUserMedia({ audio: true });
 
             const resp = await fetch(`/api/token?roomName=${roomName}&identity=${identity}`);
-            if (!resp.ok) {
-                const errorData = await resp.json().catch(() => ({ message: 'Failed to get access token.' }));
-                throw new Error(errorData.message || 'Failed to get access token.');
-            }
-            const { token } = await resp.json();
+            if (!resp.ok) throw new Error('Failed to get token');
 
+            const { token } = await resp.json();
             const newRoom = new Room();
             const wsUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
             if (!wsUrl) throw new Error("LiveKit URL is not configured.");
@@ -177,13 +167,20 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             setIsInLobby(false);
         } catch (error: any) {
             console.error("Error connecting to LiveKit:", error);
-            if (error.name === 'NotFoundError' || error.name === 'NotAllowedError') {
-                setConnectionError('Microphone access denied. Please allow access in browser settings.');
-            } else {
-                setConnectionError(error.message || 'An unexpected error occurred.');
-            }
+            setConnectionError(error.message || 'An unexpected error occurred.');
         }
     };
+    
+    const broadcastPacket = useCallback(async (packet: Packet) => {
+        if (!room) return;
+        try {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(JSON.stringify(packet));
+            await room.localParticipant.publishData(data, { reliable: true });
+        } catch (error) {
+            console.error("Failed to broadcast packet:", error);
+        }
+    }, [room]);
     
     useEffect(() => {
         if (!room) return;
@@ -193,10 +190,10 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             setTimeout(() => setConnectionNotification(null), 3000);
         }
 
-        const handleParticipantUpdate = () => setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
-        const handleParticipantConnected = (p: Participant) => { showNotification(`${p.identity} has joined.`); handleParticipantUpdate(); };
+        const handleParticipantUpdate = () => setParticipants([room.localParticipant, ...room.remoteParticipants.values()]);
+        const handleParticipantConnected = (p: Participant) => { showNotification(`${p.identity} joined.`); handleParticipantUpdate(); };
         const handleParticipantDisconnected = (p: Participant) => { 
-            showNotification(`${p.identity} has left.`); 
+            showNotification(`${p.identity} left.`); 
             handleParticipantUpdate();
             setRecordingParticipants(prev => { const newState = {...prev}; delete newState[p.identity]; return newState; });
         };
@@ -204,34 +201,41 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         const handleDataReceived = async (payload: Uint8Array, participant?: Participant) => {
             if (!participant) return;
             try {
-                const decoder = new TextDecoder();
-                const packet = JSON.parse(decoder.decode(payload)) as Packet;
+                const packet = JSON.parse(new TextDecoder().decode(payload)) as Packet;
                 
                 if (packet.type === 'voice-chunk') {
                     if (!receivedChunksRef.current[packet.noteId]) {
                         receivedChunksRef.current[packet.noteId] = { chunks: new Array(packet.total), effectId: '' };
                     }
                     receivedChunksRef.current[packet.noteId].chunks[packet.index] = packet.chunk;
-                } else if (packet.type === 'voice-end') {
-                    const noteData = receivedChunksRef.current[packet.noteId];
-                    if (noteData && noteData.chunks.every(c => c)) {
-                        noteData.effectId = packet.effectId;
+                    receivedChunksRef.current[packet.noteId].effectId = packet.effectId;
+
+                     if (receivedChunksRef.current[packet.noteId].chunks.every(c => c)) {
+                        const noteData = receivedChunksRef.current[packet.noteId];
                         const fullBase64 = noteData.chunks.join('');
                         const audioBuffer = base64ToArrayBuffer(fullBase64);
                         const processedBlob = await applyVoiceEffect(audioBuffer, noteData.effectId);
                         const audioUrl = URL.createObjectURL(processedBlob);
                         const newNote: VoiceNote = {
                             id: packet.noteId,
-                            sender: participant.identity,
+                            sender: { id: participant.sid, name: participant.identity },
                             audioUrl,
                             timestamp: Date.now(),
-                            isPlaying: false
+                            isPlaying: false,
+                            status: 'delivered'
                         };
                         setVoiceNotes(prev => [newNote, ...prev]);
                         delete receivedChunksRef.current[packet.noteId];
+                        broadcastPacket({ type: 'status-update', noteId: newNote.id, status: 'delivered' });
                     }
                 } else if (packet.type === 'status') {
                     setRecordingParticipants(prev => ({...prev, [participant.identity]: packet.status === 'recording'}));
+                } else if (packet.type === 'delete-note') {
+                    setVoiceNotes(prev => prev.filter(note => note.id !== packet.noteId));
+                } else if (packet.type === 'status-update') {
+                     setVoiceNotes(prev => prev.map(note => 
+                        note.id === packet.noteId ? {...note, status: packet.status} : note
+                    ));
                 }
             } catch (error) {
                 console.error('Error processing received data:', error);
@@ -248,30 +252,18 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
             room.off(RoomEvent.DataReceived, handleDataReceived);
         };
-    }, [room]);
-
-    const broadcastStatus = useCallback(async (status: 'recording' | 'idle') => {
-        if (!room) return;
-        try {
-            const packet: Packet = { type: 'status', status };
-            const encoder = new TextEncoder();
-            const data = encoder.encode(JSON.stringify(packet));
-            await room.localParticipant.publishData(data, { reliable: true });
-        } catch(error) {
-            console.error("Failed to broadcast status:", error);
-        }
-    }, [room]);
-
-    const handleStartRecording = async () => {
+    }, [room, broadcastPacket]);
+    
+    const handleStartRecording = useCallback(async () => {
         setRecordingStatus('recording');
-        broadcastStatus('recording');
+        broadcastPacket({ type: 'status', status: 'recording' });
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm' });
             audioChunksRef.current = [];
             mediaRecorderRef.current.ondataavailable = (event) => audioChunksRef.current.push(event.data);
             mediaRecorderRef.current.onstop = () => {
-                broadcastStatus('idle');
+                broadcastPacket({ type: 'status', status: 'idle' });
                 const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
                 const audioUrl = URL.createObjectURL(audioBlob);
                 setLastRecording({ blob: audioBlob, url: audioUrl });
@@ -283,17 +275,17 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             console.error("Error starting recording:", error);
             setConnectionError("Could not start recording.");
             setRecordingStatus('idle');
-            broadcastStatus('idle');
+            broadcastPacket({ type: 'status', status: 'idle' });
         }
-    };
+    }, [broadcastPacket]);
 
-    const handleStopRecording = () => {
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+    const handleStopRecording = useCallback(() => {
+        if (mediaRecorderRef.current?.state === 'recording') {
             mediaRecorderRef.current.stop();
         }
-    };
+    }, []);
     
-    const handleSendNote = async () => {
+    const handleSendNote = useCallback(async () => {
         if (!lastRecording.blob || !room) return;
         setRecordingStatus('sending');
         try {
@@ -301,72 +293,70 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             const base64Audio = arrayBufferToBase64(rawAudioBuffer);
             const noteId = `vn-${Date.now()}-${room.localParticipant.identity}`;
             const totalChunks = Math.ceil(base64Audio.length / CHUNK_SIZE);
+            const effectId = selectedVoice;
 
             for (let i = 0; i < totalChunks; i++) {
                 const chunk = base64Audio.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-                const packet: Packet = {
-                    type: 'voice-chunk',
-                    noteId,
-                    chunk,
-                    index: i,
-                    total: totalChunks,
-                };
-                const encoder = new TextEncoder();
-                const data = encoder.encode(JSON.stringify(packet));
-                await room.localParticipant.publishData(data, { reliable: true });
+                await broadcastPacket({type: 'voice-chunk', noteId, chunk, index: i, total: totalChunks, effectId});
             }
-            
-            const endPacket: Packet = { type: 'voice-end', noteId, total: totalChunks, effectId: selectedVoice };
-            const encoder = new TextEncoder();
-            const data = encoder.encode(JSON.stringify(endPacket));
-            await room.localParticipant.publishData(data, { reliable: true });
 
-            const processedBlob = await applyVoiceEffect(rawAudioBuffer, selectedVoice);
+            const processedBlob = await applyVoiceEffect(rawAudioBuffer, effectId);
             const audioUrl = URL.createObjectURL(processedBlob);
             const newNote: VoiceNote = {
                 id: noteId,
-                sender: 'You',
+                sender: { id: room.localParticipant.sid, name: 'You' },
                 audioUrl,
                 timestamp: Date.now(),
-                isPlaying: false
+                isPlaying: false,
+                status: 'sent'
             };
             setVoiceNotes(prev => [newNote, ...prev]);
 
         } catch (error) {
             console.error("Error sending voice note:", error);
-            setConnectionError("Failed to send voice note.");
         } finally {
             setRecordingStatus('idle');
             if (lastRecording.url) URL.revokeObjectURL(lastRecording.url);
             setLastRecording({ blob: null, url: null });
         }
-    };
+    }, [lastRecording.blob, room, selectedVoice, broadcastPacket]);
 
-    const handleDiscardNote = () => {
+    const handleDiscardNote = useCallback(() => {
         if (lastRecording.url) URL.revokeObjectURL(lastRecording.url);
         setLastRecording({ blob: null, url: null });
         setRecordingStatus('idle');
-        broadcastStatus('idle');
-    };
+        broadcastPacket({ type: 'status', status: 'idle' });
+    }, [broadcastPacket]);
 
-    const handlePlayPause = (noteId: string) => {
+    const handlePlayPause = useCallback((noteId: string) => {
         const noteToPlay = voiceNotes.find(n => n.id === noteId);
         if (!noteToPlay) return;
 
         if (audioPlayerRef.current && !audioPlayerRef.current.paused) {
             audioPlayerRef.current.pause();
             if (audioPlayerRef.current.src === noteToPlay.audioUrl) {
-                setVoiceNotes(prev => prev.map(n => ({ ...n, isPlaying: false })));
                 return;
             }
         }
         
         const newAudio = new Audio(noteToPlay.audioUrl);
         audioPlayerRef.current = newAudio;
-        newAudio.onplay = () => setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: true} : {...n, isPlaying: false}));
-        newAudio.onpause = newAudio.onended = () => setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: false} : n));
+        newAudio.onplay = () => {
+             setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: true} : {...n, isPlaying: false}));
+             if(noteToPlay.sender.name !== 'You' && noteToPlay.status !== 'played') {
+                broadcastPacket({ type: 'status-update', noteId, status: 'played' });
+             }
+        };
+        newAudio.onpause = newAudio.onended = () => {
+             setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: false} : n));
+        };
         newAudio.play();
-    };
+    }, [voiceNotes, broadcastPacket]);
+    
+    const handleDeleteNote = useCallback((noteId: string) => {
+        setVoiceNotes(prev => prev.filter(n => n.id !== noteId));
+        broadcastPacket({type: 'delete-note', noteId});
+    }, [broadcastPacket]);
 
     return (
         <div className="bg-[#080808] text-white min-h-screen flex flex-col">
@@ -392,6 +382,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                     onDiscardNote={handleDiscardNote}
                     lastRecordingUrl={lastRecording.url}
                     onPlayPause={handlePlayPause}
+                    onDeleteNote={handleDeleteNote}
                     localParticipant={room?.localParticipant}
                     recordingParticipants={recordingParticipants}
                 />
@@ -401,13 +392,22 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
 }
 
 // --- UI Components ---
-const Lobby = ({ onEnterRoom, connectionError, roomName, isConnecting, selectedVoice, setSelectedVoice }: any) => {
+const Lobby = React.memo(({ onEnterRoom, connectionError, roomName, isConnecting, selectedVoice, setSelectedVoice }: any) => {
+  const handleShare = () => {
+      const text = `Join my anonymous voice chat room on Veil!\n\nRoom Name: ${roomName}\nLink: ${window.location.href}`;
+      navigator.clipboard.writeText(text);
+      alert('Room link and name copied to clipboard!');
+  };
+
   return (
     <div className="flex-1 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
         <div className="bg-[#111] p-8 rounded-2xl flex flex-col border border-[#222]">
           <h2 className="text-2xl font-bold mb-2 text-center">Voice Notes Room</h2>
-          <p className="text-center text-gray-400 mb-8">Room: <span className="font-bold text-white">{roomName}</span></p>
+          <div className="flex justify-center items-center gap-2 mb-8">
+            <p className="text-center text-gray-400">Room: <span className="font-bold text-white">{roomName}</span></p>
+            <button onClick={handleShare} className="p-2 rounded-full hover:bg-gray-700 transition-colors"><ShareIcon className="w-5 h-5"/></button>
+          </div>
             <div className="mb-8 flex-grow">
                 <h3 className="text-lg font-semibold mb-3 text-center">Choose Your Anonymous Voice</h3>
                 <VoiceOptions selectedVoice={selectedVoice} setSelectedVoice={setSelectedVoice} />
@@ -424,9 +424,9 @@ const Lobby = ({ onEnterRoom, connectionError, roomName, isConnecting, selectedV
       </div>
     </div>
   );
-};
+});
 
-const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRecording, onStopRecording, onSendNote, onDiscardNote, lastRecordingUrl, onPlayPause, localParticipant, recordingParticipants }: any) => {
+const InCall = React.memo(({ roomName, participants, voiceNotes, recordingStatus, onStartRecording, onStopRecording, onSendNote, onDiscardNote, lastRecordingUrl, onPlayPause, onDeleteNote, localParticipant, recordingParticipants }: any) => {
     const reviewPlayerRef = useRef<HTMLAudioElement>(null);
     const hasPeers = participants.length > 1;
 
@@ -444,7 +444,7 @@ const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRe
                     {participants.map((p: Participant) => (
                         <span key={p.sid} className="ml-2">
                             {p.identity}
-                            {p.identity !== localParticipant?.identity && recordingParticipants[p.identity] && <span className="ml-2 text-red-500 font-bold animate-pulse">REC</span>}
+                            {p.sid !== localParticipant?.sid && recordingParticipants[p.identity] && <span className="ml-2 text-red-500 font-bold animate-pulse">REC</span>}
                         </span>
                     ))}
                  </div>
@@ -475,9 +475,15 @@ const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRe
                                 {note.isPlaying ? <PauseIcon className="w-5 h-5 text-white" /> : <PlayIcon className="w-5 h-5 text-white" />}
                             </button>
                             <div className="flex-1">
-                                <p className="font-bold text-white">{note.sender}</p>
-                                <p className="text-xs text-gray-400">{new Date(note.timestamp).toLocaleTimeString()}</p>
+                                <p className="font-bold text-white">{note.sender.name}</p>
+                                <div className="flex items-center gap-2 text-xs text-gray-400">
+                                    <span>{new Date(note.timestamp).toLocaleTimeString()}</span>
+                                    {note.sender.name === 'You' && <ReadReceipt status={note.status} />}
+                                </div>
                             </div>
+                            {note.sender.name === 'You' && (
+                                <button onClick={() => onDeleteNote(note.id)} className="p-2 text-gray-500 hover:text-red-500 transition-colors"><TrashIcon className="w-5 h-5"/></button>
+                            )}
                         </motion.div>
                     ))}
                 </AnimatePresence>
@@ -519,7 +525,7 @@ const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRe
             `}</style>
         </div>
     );
-};
+});
 
 const ConnectionNotification = ({ message }: { message: string | null }) => {
     return (
@@ -557,6 +563,15 @@ const VoiceOptions = React.memo(function VoiceOptions({ selectedVoice, setSelect
     );
 });
 
+const ReadReceipt = ({ status }: { status: NoteStatus }) => {
+    if (status === 'played') {
+        return <CheckDoubleIcon className="w-4 h-4 text-blue-400" />;
+    }
+    if (status === 'delivered') {
+        return <CheckDoubleIcon className="w-4 h-4 text-gray-500" />;
+    }
+    return <CheckIcon className="w-4 h-4 text-gray-500" />;
+}
 
 // --- SVG Icons ---
 const MicIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"></path> </svg> );
@@ -567,4 +582,8 @@ const SendIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" 
 const XIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"></path> </svg> );
 const MessageSquareIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"></path> </svg> );
 const UsersIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}><path strokeLinecap="round" strokeLinejoin="round" d="M18 18v-5.25m0 0a3 3 0 00-3-3m3 3a3 3 0 00-3-3m-3 3a3 3 0 00-3-3m3 3a3 3 0 00-3-3m-3 3a3 3 0 00-3-3m3 3a3 3 0 00-3-3m0 9.75V18m0-9.75a3 3 0 013-3m-3 3a3 3 0 00-3 3m3-3a3 3 0 013-3m-3 3a3 3 0 00-3 3m6.75 3.375c.621 1.278 1.694 2.34 2.873 3.118a48.455 48.455 0 01-5.746 0c1.179-.778 2.252-1.84 2.873-3.118z"></path></svg>);
+const ShareIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3s3-1.34 3-3-1.34-3-3-3z"></path></svg>);
+const TrashIcon = (props: SVGProps<SVGSVGElement>) => (<svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"></path></svg>);
+const CheckIcon = (props: SVGProps<SVGSVGElement>) => (<svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"></path></svg>);
+const CheckDoubleIcon = (props: SVGProps<SVGSVGElement>) => (<svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}><path d="M0.41 13.41L6 19l1.41-1.42L1.83 12 0.41 13.41zM22.41 5.41L12 15.83l-1.41-1.42L21 4 22.41 5.41zM18 7l-1.41-1.42L6 16.17 7.41 17.58 18 7z"></path></svg>);
 
