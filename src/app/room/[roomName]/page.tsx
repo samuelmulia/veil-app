@@ -42,9 +42,6 @@ type Subtitle = {
 class SpeechRecognitionManager {
     private recognition: any;
     private isActive: boolean = false;
-    private restartAttempts: number = 0;
-    private maxRestartAttempts: number = 5;
-    private restartDelay: number = 1000;
 
     constructor(
         private language: string,
@@ -78,50 +75,29 @@ class SpeechRecognitionManager {
                 }
             }
             
-            if (interimTranscript.length > 0) {
-                this.onResult(interimTranscript, false);
-            }
-
-            if (finalTranscript) {
-                this.onResult(finalTranscript, true);
-                this.restartAttempts = 0;
-            }
+            if (interimTranscript) this.onResult(interimTranscript, false);
+            if (finalTranscript) this.onResult(finalTranscript, true);
         };
 
         this.recognition.onend = () => {
-            if (this.isActive && this.restartAttempts < this.maxRestartAttempts) {
-                setTimeout(() => {
-                    if (this.isActive) {
-                        this.restartAttempts++;
-                        try {
-                            this.recognition.start();
-                        } catch (e) {
-                            console.error("Error restarting speech recognition:", e);
-                        }
-                    }
-                }, this.restartDelay);
+            if (this.isActive) {
+                this.start();
             }
         };
         
         this.recognition.onerror = (event: any) => {
             console.error("Speech recognition error:", event.error);
             this.onError(event.error);
-            if (event.error === 'no-speech' || event.error === 'audio-capture') {
-                this.restartAttempts++;
-            }
         };
     }
 
     start() {
         if (!this.recognition || this.isActive) return;
-        
         this.isActive = true;
-        this.restartAttempts = 0;
         try {
             this.recognition.start();
         } catch (e) {
             console.error("Error starting speech recognition:", e);
-            this.onError(e);
         }
     }
 
@@ -131,7 +107,7 @@ class SpeechRecognitionManager {
             try {
                 this.recognition.stop();
             } catch (e) {
-                console.error("Error stopping speech recognition:", e);
+                // Ignore errors when stopping, it might already be stopped
             }
         }
     }
@@ -165,16 +141,10 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     const [room, setRoom] = useState<Room | undefined>(undefined);
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [speakingParticipants, setSpeakingParticipants] = useState<Participant[]>([]);
-    const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Disconnected);
     const [connectionError, setConnectionError] = useState<string | null>(null);
 
-    const audioContainerRef = useRef<HTMLDivElement>(null);
-    const audioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
-
-    const speakingSids = useMemo(
-        () => new Set(speakingParticipants.map(p => p.sid)),
-        [speakingParticipants]
-    );
+    const speakingSids = useMemo(() => new Set(speakingParticipants.map(p => p.sid)), [speakingParticipants]);
+    const remoteParticipants = useMemo(() => participants.filter(p => p !== room?.localParticipant), [participants, room]);
 
     const router = useRouter();
     const roomName = params.roomName;
@@ -211,6 +181,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             setIsMuted(false);
 
             setRoom(newRoom);
+            setParticipants([newRoom.localParticipant, ...newRoom.remoteParticipants.values()]);
             setIsInLobby(false);
         } catch (error: any) {
             console.error("Error connecting to LiveKit:", error);
@@ -221,70 +192,26 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             }
         }
     };
-
-    // --- LiveKit Core Event Handling ---
+    
+    // --- Room State Handling ---
     useEffect(() => {
         if (!room) return;
-
-        const updateParticipantsList = () => {
-            console.log("Updating participants list...");
-            setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
-        };
-        
-        const handleTrackSubscribed = (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
-            if (track.kind === 'audio' && audioContainerRef.current) {
-                const audioElement = track.attach();
-                console.log(`Attaching audio for ${participant.identity}`);
-                audioContainerRef.current.appendChild(audioElement);
-                audioElementsRef.current.set(publication.trackSid, audioElement);
-            }
-        };
-        
-        const handleTrackUnsubscribed = (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
-            console.log(`Detaching audio for ${participant.identity}`);
-            const audioElement = audioElementsRef.current.get(publication.trackSid);
-            if (audioElement) {
-                audioElement.remove();
-                audioElementsRef.current.delete(publication.trackSid);
-            }
-        };
-        
-        const handleParticipantConnected = (participant: RemoteParticipant) => {
-            console.log(`Participant connected: ${participant.identity}`);
-            updateParticipantsList();
-            
-            participant.on(RoomEvent.TrackPublished, (publication: RemoteTrackPublication) => {
-                if (publication.kind === 'audio') {
-                    publication.setSubscribed(true);
-                }
-            });
+        const updateParticipants = () => {
+            setParticipants([room.localParticipant, ...room.remoteParticipants.values()]);
         };
 
-        const handleParticipantDisconnected = (participant: RemoteParticipant) => {
-            console.log(`Participant disconnected: ${participant.identity}`);
-            updateParticipantsList();
-        };
-
-        updateParticipantsList();
-        
-        room.remoteParticipants.forEach(handleParticipantConnected);
-        
-        room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
-        room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
+        room.on(RoomEvent.ParticipantConnected, updateParticipants);
+        room.on(RoomEvent.ParticipantDisconnected, updateParticipants);
         room.on(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
-        room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
-        room.on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
-
+        
         return () => {
-            room.off(RoomEvent.ParticipantConnected, handleParticipantConnected);
-            room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
+            room.off(RoomEvent.ParticipantConnected, updateParticipants);
+            room.off(RoomEvent.ParticipantDisconnected, updateParticipants);
             room.off(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
-            room.off(RoomEvent.TrackSubscribed, handleTrackSubscribed);
-            room.off(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
         };
     }, [room]);
     
-    // --- LiveKit Data (Subtitle) Event Handling ---
+    // --- Data (Subtitle) Event Handling ---
     useEffect(() => {
         if (!room) return;
 
@@ -331,9 +258,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                         }
                     }
                 },
-                (error) => {
-                    console.error('Speech recognition error from manager:', error);
-                }
+                (error) => console.error('Speech recognition error from manager:', error)
             );
             recognitionManager.start();
         }
@@ -360,12 +285,14 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 
     return (
         <>
-            <div ref={audioContainerRef} style={{ display: 'none' }} />
+            {remoteParticipants.map(participant => (
+                <ParticipantAudio key={participant.sid} participant={participant} />
+            ))}
             {isInLobby ? (
                 <Lobby 
                   onEnterRoom={handleEnterRoom} 
                   connectionError={connectionError}
-                  {...{ roomName, isConnecting: connectionState === ConnectionState.Connecting, selectedVoice, setSelectedVoice }} 
+                  {...{ roomName, isConnecting: room?.state === ConnectionState.Connecting, selectedVoice, setSelectedVoice }} 
                 />
             ) : (
                 <InCall
@@ -381,6 +308,46 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         </>
     );
 }
+
+// --- Child Component for Handling Remote Participant Audio ---
+function ParticipantAudio({ participant }: { participant: RemoteParticipant }) {
+    const audioRef = useRef<HTMLAudioElement>(null);
+
+    useEffect(() => {
+        const handleTrackSubscribed = (track: RemoteTrack) => {
+            if (track.kind === 'audio' && audioRef.current) {
+                track.attach(audioRef.current);
+            }
+        };
+
+        const handleTrackUnsubscribed = (track: RemoteTrack) => {
+            if (track.kind === 'audio') {
+                track.detach();
+            }
+        };
+
+        participant.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+        participant.on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
+
+        participant.trackPublications.forEach(pub => {
+            if (pub.kind === 'audio') {
+                if (pub.track) {
+                    handleTrackSubscribed(pub.track as RemoteTrack);
+                } else {
+                    pub.setSubscribed(true);
+                }
+            }
+        });
+
+        return () => {
+            participant.off(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+            participant.off(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
+        };
+    }, [participant]);
+
+    return <audio ref={audioRef} />;
+}
+
 
 // --- UI Components ---
 const Lobby = React.memo(function Lobby({ roomName, isConnecting, selectedVoice, setSelectedVoice, onEnterRoom, connectionError }: any) {
