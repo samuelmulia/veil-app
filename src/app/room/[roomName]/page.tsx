@@ -114,8 +114,11 @@ function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
     const length = abuffer.length * numOfChan * 2 + 44;
     const buffer = new ArrayBuffer(length);
     const view = new DataView(buffer);
+    // FIX: Moved channel declaration to the top of the function
+    const channels: Float32Array[] = [];
     let i, sample, offset = 0, pos = 0;
 
+    // write WAVE header
     setUint32(0x46464952); // "RIFF"
     setUint32(length - 8);
     setUint32(0x45564157); // "WAVE"
@@ -147,7 +150,6 @@ function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
 
     function setUint16(data: number) { view.setUint16(pos, data, true); pos += 2; }
     function setUint32(data: number) { view.setUint32(pos, data, true); pos += 4; }
-    const channels: Float32Array[] = [];
 }
 
 // --- Main Page Component ---
