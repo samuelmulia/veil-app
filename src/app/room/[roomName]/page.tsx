@@ -136,22 +136,6 @@ class SpeechRecognitionManager {
         }
     }
 
-    updateLanguage(language: string) {
-        if (this.language === language) return;
-        
-        this.language = language;
-        const wasActive = this.isActive;
-        this.stop();
-        
-        if (this.recognition) {
-            this.recognition.lang = language;
-        }
-        
-        if (wasActive) {
-            setTimeout(() => this.start(), 100);
-        }
-    }
-
     dispose() {
         this.stop();
         this.recognition = null;
@@ -186,7 +170,6 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 
     const audioContainerRef = useRef<HTMLDivElement>(null);
     const audioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
-    const speechRecognitionRef = useRef<SpeechRecognitionManager | null>(null);
 
     const speakingSids = useMemo(
         () => new Set(speakingParticipants.map(p => p.sid)),
@@ -270,7 +253,6 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 
         const handleTrackPublished = (publication: RemoteTrackPublication, participant: RemoteParticipant) => {
             if (publication.kind === 'audio' && !publication.isSubscribed) {
-                // The publication object itself has the setSubscribed method
                 publication.setSubscribed(true);
             }
         };
@@ -280,7 +262,6 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         room.remoteParticipants.forEach(p => {
             p.trackPublications.forEach(pub => {
                 if(pub.kind === 'audio' && !pub.isSubscribed) {
-                    // FIX: Use publication.setSubscribed
                     (pub as RemoteTrackPublication).setSubscribed(true);
                 }
             });
@@ -327,15 +308,12 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 
     // --- Speech Recognition Logic ---
     useEffect(() => {
+        let recognitionManager: SpeechRecognitionManager | null = null;
+        
         const shouldBeRecognizing = !isInLobby && room && !isMuted && isSubtitlesEnabled;
 
-        if (!shouldBeRecognizing) {
-            speechRecognitionRef.current?.stop();
-            return;
-        }
-
-        if (!speechRecognitionRef.current) {
-            speechRecognitionRef.current = new SpeechRecognitionManager(
+        if (shouldBeRecognizing) {
+            recognitionManager = new SpeechRecognitionManager(
                 selectedLanguage,
                 (text, isFinal) => {
                     updateSubtitle({ speakerName: 'You', text, timestamp: Date.now() });
@@ -349,27 +327,23 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                         }
                     }
                 },
-                (error) => console.error('Speech recognition error:', error)
+                (error) => {
+                    console.error('Speech recognition error from manager:', error);
+                }
             );
-        } else {
-            speechRecognitionRef.current.updateLanguage(selectedLanguage);
+            recognitionManager.start();
         }
 
-        speechRecognitionRef.current.start();
-
-        return () => speechRecognitionRef.current?.stop();
+        return () => {
+            recognitionManager?.dispose();
+        };
     }, [isInLobby, room, isMuted, isSubtitlesEnabled, selectedLanguage, updateSubtitle]);
 
-    // --- Component Cleanup ---
-    useEffect(() => {
-        return () => {
-            room?.disconnect();
-        };
-    }, [room]);
 
     const handleLeaveRoom = useCallback(() => {
+        room?.disconnect();
         router.push('/');
-    }, [router]);
+    }, [room, router]);
 
     const toggleMute = useCallback(() => {
         const newMutedState = !isMuted;
