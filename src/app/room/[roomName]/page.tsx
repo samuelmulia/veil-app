@@ -331,7 +331,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
     const [isOnline, setIsOnline] = useState(navigator.onLine);
 
     const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
-    const receivedChunksRef = useRef<Record<string, { chunks: string[]; totalChunks: number }>>({});
+    const receivedChunksRef = useRef<Record<string, string[]>>({});
     const router = useRouter();
     const roomName = params.roomName;
 
@@ -448,20 +448,17 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                 switch (packet.type) {
                     case 'voice-chunk':
                         if (!receivedChunksRef.current[packet.noteId]) {
-                            receivedChunksRef.current[packet.noteId] = {
-                                chunks: new Array(packet.total),
-                                totalChunks: packet.total
-                            };
+                            receivedChunksRef.current[packet.noteId] = new Array(packet.total);
                         }
-                        receivedChunksRef.current[packet.noteId].chunks[packet.index] = packet.chunk;
+                        receivedChunksRef.current[packet.noteId][packet.index] = packet.chunk;
                         break;
                         
                     case 'voice-end':
-                        const chunkData = receivedChunksRef.current[packet.noteId];
-                        if (chunkData && chunkData.chunks.length === packet.totalChunks && 
-                            chunkData.chunks.every(c => c !== undefined)) {
+                        const chunks = receivedChunksRef.current[packet.noteId];
+                        if (chunks && chunks.length === packet.totalChunks && 
+                            chunks.every(c => c !== undefined)) {
                             
-                            const fullBase64 = chunkData.chunks.join('');
+                            const fullBase64 = chunks.join('');
                             const audioBuffer = EncodingUtils.base64ToArrayBuffer(fullBase64);
                             const audioBlob = new Blob([audioBuffer], { type: 'audio/wav' });
                             const audioUrl = URL.createObjectURL(audioBlob);
