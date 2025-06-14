@@ -238,7 +238,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         }
     };
 
-    // --- LiveKit Event Handling ---
+    // --- LiveKit Core Event Handling ---
     useEffect(() => {
         if (!room) return;
 
@@ -264,6 +264,29 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
             }
             track.detach().forEach(element => element.remove());
         };
+        
+        updateParticipantsList();
+
+        room.on(RoomEvent.ParticipantConnected, updateParticipantsList);
+        room.on(RoomEvent.ParticipantDisconnected, updateParticipantsList);
+        room.on(RoomEvent.ConnectionStateChanged, setConnectionState);
+        room.on(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
+        room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+        room.on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
+
+        return () => {
+            room.off(RoomEvent.ParticipantConnected, updateParticipantsList);
+            room.off(RoomEvent.ParticipantDisconnected, updateParticipantsList);
+            room.off(RoomEvent.ConnectionStateChanged, setConnectionState);
+            room.off(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
+            room.off(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+            room.off(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
+        };
+    }, [room]);
+    
+    // --- LiveKit Data (Subtitle) Event Handling ---
+    useEffect(() => {
+        if (!room) return;
 
         const handleDataReceived = (payload: Uint8Array, participant?: Participant) => {
             if (!isSubtitlesEnabled) return;
@@ -280,28 +303,13 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                 console.error('Error processing subtitle data:', error);
             }
         };
-        
-        updateParticipantsList();
 
-        room.on(RoomEvent.ParticipantConnected, updateParticipantsList);
-        room.on(RoomEvent.ParticipantDisconnected, updateParticipantsList);
-        room.on(RoomEvent.ConnectionStateChanged, setConnectionState);
-        room.on(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
-        room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
-        room.on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
         room.on(RoomEvent.DataReceived, handleDataReceived);
-
         return () => {
-            room.off(RoomEvent.ParticipantConnected, updateParticipantsList);
-            room.off(RoomEvent.ParticipantDisconnected, updateParticipantsList);
-            room.off(RoomEvent.ConnectionStateChanged, setConnectionState);
-            room.off(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
-            room.off(RoomEvent.TrackSubscribed, handleTrackSubscribed);
-            room.off(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
             room.off(RoomEvent.DataReceived, handleDataReceived);
-        };
+        }
     }, [room, isSubtitlesEnabled, updateSubtitle]);
-    
+
     // --- Speech Recognition Logic ---
     useEffect(() => {
         const shouldBeRecognizing = !isInLobby && room && !isMuted && isSubtitlesEnabled;
