@@ -31,9 +31,8 @@ type VoiceNote = {
 
 type VoiceNotePacket = {
     effectId: string;
-    audioBuffer: ArrayBuffer;
+    audioBuffer: number[]; // Use a plain array for JSON serialization
 };
-
 
 // --- Audio Processing Utility ---
 async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Promise<Blob> {
@@ -41,7 +40,9 @@ async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Pro
     const sourceAudioBuffer = await audioContext.decodeAudioData(audioBuffer.slice(0));
 
     if (effectId === 'original') {
-        return new Blob([audioBuffer], { type: 'audio/webm' });
+        // To ensure consistent format, let's re-encode original as WAV too
+        const wavBuffer = bufferToWav(sourceAudioBuffer);
+        return new Blob([wavBuffer], { type: 'audio/wav' });
     }
 
     const offlineContext = new OfflineAudioContext(
@@ -58,12 +59,8 @@ async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Pro
     let lastNode: AudioNode = source;
 
     switch (effectId) {
-        case 'agent_alpha':
-            pitchRate = 0.75;
-            break;
-        case 'agent_delta':
-            pitchRate = 1.5;
-            break;
+        case 'agent_alpha': pitchRate = 0.75; break;
+        case 'agent_delta': pitchRate = 1.5; break;
         case 'synthetic':
             pitchRate = 0.9;
             filter = offlineContext.createBiquadFilter();
@@ -99,38 +96,29 @@ function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
     const buffer = new ArrayBuffer(length);
     const view = new DataView(buffer);
     const channels: Float32Array[] = [];
-    // FIX: Changed declarations from a single 'const' block to individual 'let' for mutable variables.
-    let i;
-    let sample;
-    let offset = 0;
-    let pos = 0;
+    let i, sample, offset = 0, pos = 0;
 
-    // write WAVE header
     setUint32(0x46464952); // "RIFF"
-    setUint32(length - 8); // file length - 8
+    setUint32(length - 8);
     setUint32(0x45564157); // "WAVE"
-
-    setUint32(0x20746d66); // "fmt " chunk
-    setUint32(16); // length = 16
-    setUint16(1); // PCM (uncompressed)
+    setUint32(0x20746d66); // "fmt "
+    setUint32(16);
+    setUint16(1);
     setUint16(numOfChan);
     setUint32(abuffer.sampleRate);
-    setUint32(abuffer.sampleRate * 2 * numOfChan); // avg. bytes/sec
-    setUint16(numOfChan * 2); // block-align
-    setUint16(16); // 16-bit
+    setUint32(abuffer.sampleRate * 2 * numOfChan);
+    setUint16(numOfChan * 2);
+    setUint16(16);
+    setUint32(0x61746164); // "data"
+    setUint32(length - pos - 4);
 
-    setUint32(0x61746164); // "data" - chunk
-    setUint32(length - pos - 4); // chunk length
-
-    // write interleaved data
-    for (i = 0; i < abuffer.numberOfChannels; i++)
-        channels.push(abuffer.getChannelData(i));
+    for (i = 0; i < abuffer.numberOfChannels; i++) channels.push(abuffer.getChannelData(i));
 
     while (pos < length) {
         for (i = 0; i < numOfChan; i++) {
-            sample = Math.max(-1, Math.min(1, channels[i][offset])); // clamp
-            sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0; // scale to 16-bit signed int
-            view.setInt16(pos, sample, true); // write 16-bit sample
+            sample = Math.max(-1, Math.min(1, channels[i][offset]));
+            sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0;
+            view.setInt16(pos, sample, true);
             pos += 2;
         }
         offset++;
@@ -141,7 +129,6 @@ function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
     function setUint32(data: number) { view.setUint32(pos, data, true); pos += 4; }
 }
 
-
 // --- Main Page Component ---
 export default function VoiceNotesPage({ params }: { params: { roomName:string } }) {
     const [isInLobby, setIsInLobby] = useState(true);
@@ -149,9 +136,12 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [connectionError, setConnectionError] = useState<string | null>(null);
     const [voiceNotes, setVoiceNotes] = useState<VoiceNote[]>([]);
-    const [isRecording, setIsRecording] = useState(false);
-    const [selectedVoice, setSelectedVoice] = useState('original');
+    
+    // UI State Management
+    const [recordingStatus, setRecordingStatus] = useState<'idle' | 'recording' | 'reviewing' | 'sending'>('idle');
+    const [lastRecording, setLastRecording] = useState<{ blob: Blob | null, url: string | null }>({ blob: null, url: null });
 
+    const [selectedVoice, setSelectedVoice] = useState('original');
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
     const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
@@ -178,7 +168,6 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             if (!wsUrl) throw new Error("LiveKit URL is not configured.");
             
             await newRoom.connect(wsUrl, token);
-            
             setRoom(newRoom);
             setIsInLobby(false);
         } catch (error: any) {
@@ -191,25 +180,16 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         }
     };
     
-    // --- LiveKit Event Handling ---
     useEffect(() => {
         if (!room) return;
-
-        const updateParticipantsList = () => {
-            setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
-        };
-
+        const updateParticipantsList = () => setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
         const handleDataReceived = async (payload: Uint8Array, participant?: Participant) => {
             try {
-                const decoder = new TextDecoder("utf-8", { fatal: true });
-                const packet = JSON.parse(decoder.decode(payload));
-                
-                // Reconstruct ArrayBuffer from the plain object
-                const audioBuffer = new Uint8Array(Object.values(packet.audioBuffer)).buffer;
-                
+                const decoder = new TextDecoder();
+                const packet = JSON.parse(decoder.decode(payload)) as VoiceNotePacket;
+                const audioBuffer = new Uint8Array(packet.audioBuffer).buffer;
                 const processedBlob = await applyVoiceEffect(audioBuffer, packet.effectId);
                 const audioUrl = URL.createObjectURL(processedBlob);
-
                 const newNote: VoiceNote = {
                     id: `vn-${Date.now()}-${Math.random()}`,
                     sender: participant?.identity || 'Unknown',
@@ -222,12 +202,10 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                 console.error('Error processing received voice note:', error);
             }
         };
-
         updateParticipantsList();
         room.on(RoomEvent.ParticipantConnected, updateParticipantsList);
         room.on(RoomEvent.ParticipantDisconnected, updateParticipantsList);
         room.on(RoomEvent.DataReceived, handleDataReceived);
-
         return () => {
             room.off(RoomEvent.ParticipantConnected, updateParticipantsList);
             room.off(RoomEvent.ParticipantDisconnected, updateParticipantsList);
@@ -236,46 +214,58 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     }, [room]);
 
     const handleStartRecording = async () => {
+        setRecordingStatus('recording');
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm' });
             audioChunksRef.current = [];
-
-            mediaRecorderRef.current.ondataavailable = (event) => {
-                audioChunksRef.current.push(event.data);
-            };
-
-            mediaRecorderRef.current.onstop = async () => {
+            mediaRecorderRef.current.ondataavailable = (event) => audioChunksRef.current.push(event.data);
+            mediaRecorderRef.current.onstop = () => {
                 const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-                const arrayBuffer = await audioBlob.arrayBuffer();
-
-                const packet = {
-                    effectId: selectedVoice,
-                    audioBuffer: Array.from(new Uint8Array(arrayBuffer)), // Convert to array for JSON serialization
-                };
-                
-                if (room) {
-                    const encoder = new TextEncoder();
-                    const data = encoder.encode(JSON.stringify(packet));
-                    await room.localParticipant.publishData(data, { reliable: true });
-                }
-                
+                const audioUrl = URL.createObjectURL(audioBlob);
+                setLastRecording({ blob: audioBlob, url: audioUrl });
+                setRecordingStatus('reviewing');
                 stream.getTracks().forEach(track => track.stop());
             };
-
             mediaRecorderRef.current.start();
-            setIsRecording(true);
         } catch (error) {
             console.error("Error starting recording:", error);
-            setConnectionError("Could not start recording. Check microphone permissions.");
+            setConnectionError("Could not start recording.");
+            setRecordingStatus('idle');
         }
     };
 
     const handleStopRecording = () => {
         if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
             mediaRecorderRef.current.stop();
-            setIsRecording(false);
         }
+    };
+    
+    const handleSendNote = async () => {
+        if (!lastRecording.blob || !room) return;
+        setRecordingStatus('sending');
+        try {
+            const arrayBuffer = await lastRecording.blob.arrayBuffer();
+            const packet: VoiceNotePacket = {
+                effectId: selectedVoice,
+                audioBuffer: Array.from(new Uint8Array(arrayBuffer)),
+            };
+            const encoder = new TextEncoder();
+            const data = encoder.encode(JSON.stringify(packet));
+            await room.localParticipant.publishData(data, { reliable: true });
+        } catch (error) {
+            console.error("Error sending voice note:", error);
+            setConnectionError("Failed to send voice note.");
+        } finally {
+            setRecordingStatus('idle');
+            setLastRecording({ blob: null, url: null });
+        }
+    };
+
+    const handleDiscardNote = () => {
+        if (lastRecording.url) URL.revokeObjectURL(lastRecording.url);
+        setLastRecording({ blob: null, url: null });
+        setRecordingStatus('idle');
     };
 
     const handlePlayPause = (noteId: string) => {
@@ -292,17 +282,11 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         
         const newAudio = new Audio(noteToPlay.audioUrl);
         audioPlayerRef.current = newAudio;
-        
-        newAudio.onplay = () => {
-             setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: true} : {...n, isPlaying: false}));
-        };
-        newAudio.onpause = newAudio.onended = () => {
-             setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: false} : n));
-        };
-
+        newAudio.onplay = () => setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: true} : {...n, isPlaying: false}));
+        newAudio.onpause = newAudio.onended = () => setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: false} : n));
         newAudio.play();
     };
-    
+
     return (
         <div className="bg-[#080808] text-white min-h-screen flex flex-col">
             {isInLobby ? (
@@ -319,9 +303,12 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                     roomName={roomName}
                     participants={participants}
                     voiceNotes={voiceNotes}
-                    isRecording={isRecording}
+                    recordingStatus={recordingStatus}
                     onStartRecording={handleStartRecording}
                     onStopRecording={handleStopRecording}
+                    onSendNote={handleSendNote}
+                    onDiscardNote={handleDiscardNote}
+                    lastRecordingUrl={lastRecording.url}
                     onPlayPause={handlePlayPause}
                     localParticipant={room?.localParticipant}
                 />
@@ -356,7 +343,13 @@ const Lobby = ({ onEnterRoom, connectionError, roomName, isConnecting, selectedV
   );
 };
 
-const InCall = ({ roomName, participants, voiceNotes, isRecording, onStartRecording, onStopRecording, onPlayPause, localParticipant }: any) => {
+const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRecording, onStopRecording, onSendNote, onDiscardNote, lastRecordingUrl, onPlayPause, localParticipant }: any) => {
+    const reviewPlayerRef = useRef<HTMLAudioElement>(null);
+
+    const playReview = () => {
+        if(reviewPlayerRef.current) reviewPlayerRef.current.play();
+    }
+
     return (
         <div className="flex-1 flex flex-col p-4 md:p-6 max-w-4xl mx-auto w-full">
             <header className="mb-6">
@@ -369,8 +362,7 @@ const InCall = ({ roomName, participants, voiceNotes, isRecording, onStartRecord
                     {voiceNotes.length === 0 && (
                         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center h-full text-gray-500">
                             <MessageSquareIcon className="w-16 h-16 mb-4" />
-                            <p>No voice notes yet.</p>
-                            <p>Press and hold the record button to start.</p>
+                            <p>No voice notes yet. Press the mic to start.</p>
                         </motion.div>
                     )}
                     {voiceNotes.map((note: VoiceNote) => (
@@ -392,39 +384,39 @@ const InCall = ({ roomName, participants, voiceNotes, isRecording, onStartRecord
                     ))}
                 </AnimatePresence>
             </div>
-            <footer className="flex justify-center items-center p-4">
-                <button
-                    onMouseDown={onStartRecording}
-                    onMouseUp={onStopRecording}
-                    onTouchStart={onStartRecording}
-                    onTouchEnd={onStopRecording}
-                    className={`record-btn w-24 h-24 rounded-full flex items-center justify-center transition-all duration-200 ease-in-out ${isRecording ? 'recording' : ''}`}
-                >
-                    <MicIcon className="w-10 h-10 text-white" />
-                </button>
+            <footer className="flex justify-center items-center p-4 h-32">
+                {recordingStatus === 'idle' && (
+                    <button onClick={onStartRecording} className="record-btn idle w-24 h-24 rounded-full flex items-center justify-center transition-all duration-200 ease-in-out">
+                        <MicIcon className="w-10 h-10 text-white" />
+                    </button>
+                )}
+                {recordingStatus === 'recording' && (
+                    <button onClick={onStopRecording} className="record-btn recording w-24 h-24 rounded-full flex items-center justify-center transition-all">
+                        <StopIcon className="w-10 h-10 text-white" />
+                    </button>
+                )}
+                 {recordingStatus === 'reviewing' && (
+                    <div className="flex items-center gap-4">
+                        <button onClick={onDiscardNote} className="bg-gray-600 hover:bg-gray-500 p-4 rounded-full"><XIcon className="w-6 h-6 text-white"/></button>
+                        {lastRecordingUrl && <audio ref={reviewPlayerRef} src={lastRecordingUrl} />}
+                        <button onClick={playReview} className="bg-blue-600 hover:bg-blue-500 p-5 rounded-full"><PlayIcon className="w-8 h-8 text-white"/></button>
+                        <button onClick={onSendNote} className="bg-green-600 hover:bg-green-500 p-4 rounded-full"><SendIcon className="w-6 h-6 text-white"/></button>
+                    </div>
+                )}
+                {recordingStatus === 'sending' && (
+                     <div className="text-gray-400">Sending...</div>
+                )}
             </footer>
              <style jsx>{`
-                .record-btn {
-                    background: #dc2626;
-                    box-shadow: 0 0 0 0 rgba(220, 38, 38, 1);
-                }
+                .record-btn.idle { background: #1e40af; }
                 .record-btn.recording {
+                    background: #dc2626;
                     animation: pulse-red 2s infinite;
-                    transform: scale(1.1);
                 }
                 @keyframes pulse-red {
-                    0% {
-                        transform: scale(0.95);
-                        box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.7);
-                    }
-                    70% {
-                        transform: scale(1.1);
-                        box-shadow: 0 0 0 25px rgba(220, 38, 38, 0);
-                    }
-                    100% {
-                        transform: scale(0.95);
-                        box-shadow: 0 0 0 0 rgba(220, 38, 38, 0);
-                    }
+                    0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.7); }
+                    70% { box-shadow: 0 0 0 25px rgba(220, 38, 38, 0); }
+                    100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
                 }
             `}</style>
         </div>
@@ -448,11 +440,11 @@ const VoiceOptions = React.memo(function VoiceOptions({ selectedVoice, setSelect
     );
 });
 
-
 // --- SVG Icons ---
 const MicIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"></path> </svg> );
 const PlayIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M8 5v14l11-7z"></path> </svg> );
 const PauseIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"></path> </svg> );
-const CheckIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path> </svg> );
-const CopyIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"></path> </svg> );
+const StopIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M6 6h12v12H6z"></path> </svg> );
+const SendIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path> </svg> );
+const XIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"></path> </svg> );
 const MessageSquareIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"></path> </svg> );
