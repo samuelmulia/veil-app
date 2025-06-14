@@ -244,26 +244,23 @@ const useAudioRecorder = () => {
                     streamRef.current.getTracks().forEach(track => track.stop());
                     streamRef.current = null;
                 }
-                if (recordingTimerRef.current) {
-                    clearInterval(recordingTimerRef.current);
-                    recordingTimerRef.current = null;
-                }
             };
             
-            mediaRecorderRef.current.start(1000); // Collect data every second
+            // Start recording
+            mediaRecorderRef.current.start();
             setRecordingStatus('recording');
             setRecordingTime(0);
             
-            // Start recording timer
+            // Start recording timer with more precise timing
+            const startTime = Date.now();
             recordingTimerRef.current = setInterval(() => {
-                setRecordingTime(prev => {
-                    if (prev >= MAX_RECORDING_TIME / 1000) {
-                        stopRecording();
-                        return prev;
-                    }
-                    return prev + 1;
-                });
-            }, 1000);
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                setRecordingTime(elapsed);
+                
+                if (elapsed >= MAX_RECORDING_TIME / 1000) {
+                    stopRecording();
+                }
+            }, 100); // Update every 100ms for smoother timer
             
             return true;
         } catch (error) {
@@ -275,6 +272,12 @@ const useAudioRecorder = () => {
 
     const stopRecording = useCallback((): Promise<Blob | null> => {
         return new Promise((resolve) => {
+            // Clear timer first
+            if (recordingTimerRef.current) {
+                clearInterval(recordingTimerRef.current);
+                recordingTimerRef.current = null;
+            }
+            
             if (mediaRecorderRef.current?.state === 'recording') {
                 mediaRecorderRef.current.onstop = () => {
                     const audioBlob = new Blob(audioChunksRef.current, { 
@@ -448,15 +451,22 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                 switch (packet.type) {
                     case 'voice-chunk':
                         if (!receivedChunksRef.current[packet.noteId]) {
-                            receivedChunksRef.current[packet.noteId] = new Array(packet.total);
+                            receivedChunksRef.current[packet.noteId] = new Array(packet.total).fill(null);
                         }
                         receivedChunksRef.current[packet.noteId][packet.index] = packet.chunk;
+                        
+                        // Debug: Log chunk reception
+                        const received = receivedChunksRef.current[packet.noteId].filter(c => c !== null).length;
+                        console.log(`Chunk ${packet.index + 1}/${packet.total} received for ${packet.noteId} (${received}/${packet.total})`);
                         break;
                         
                     case 'voice-end':
                         const chunks = receivedChunksRef.current[packet.noteId];
-                        if (chunks && chunks.length === packet.totalChunks && 
-                            chunks.every(c => c !== undefined)) {
+                        if (chunks && chunks.length === packet.totalChunks) {
+                            const validChunks = chunks.filter(c => c !== null && c !== undefined);
+                            console.log(`Voice-end received: Expected ${packet.totalChunks}, got ${validChunks.length} valid chunks`);
+                            
+                            if (validChunks.length === packet.totalChunks && chunks.every(c => c !== null && c !== undefined)) {
                             
                             const fullBase64 = chunks.join('');
                             const audioBuffer = EncodingUtils.base64ToArrayBuffer(fullBase64);
@@ -563,34 +573,49 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
             const noteId = `vn-${Date.now()}-${room.localParticipant.identity}`;
             const totalChunks = Math.ceil(base64Audio.length / CHUNK_SIZE);
 
-            // Send chunks with retry logic
+            console.log(`Sending voice note: ${totalChunks} chunks, ${base64Audio.length} bytes`);
+
+            // Send chunks with better reliability
+            const chunkPromises = [];
             for (let i = 0; i < totalChunks; i++) {
                 const chunk = base64Audio.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-                const success = await broadcastPacket({
+                const promise = broadcastPacket({
                     type: 'voice-chunk',
                     noteId,
                     chunk,
                     index: i,
                     total: totalChunks
                 });
+                chunkPromises.push(promise);
                 
-                if (!success) {
-                    throw new Error('Failed to send voice note chunk');
-                }
-                
-                // Small delay to prevent overwhelming the network
+                // Add small delay between chunks to prevent overwhelming
                 if (i < totalChunks - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 10));
+                    await new Promise(resolve => setTimeout(resolve, 50));
                 }
             }
             
-            await broadcastPacket({
+            // Wait for all chunks to be sent
+            const results = await Promise.all(chunkPromises);
+            const failedChunks = results.filter(result => !result);
+            
+            if (failedChunks.length > 0) {
+                throw new Error(`Failed to send ${failedChunks.length} chunks`);
+            }
+            
+            // Send end packet with verification
+            const endSuccess = await broadcastPacket({
                 type: 'voice-end',
                 noteId,
                 totalChunks,
                 effectId: selectedVoice,
                 duration
             });
+            
+            if (!endSuccess) {
+                throw new Error('Failed to send voice-end packet');
+            }
+            
+            console.log(`Voice note sent successfully: ${noteId}`);
             
             const newNote: VoiceNote = {
                 id: noteId,
@@ -608,6 +633,8 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
         } catch (error) {
             console.error("Error sending voice note:", error);
             showNotification('Failed to send voice note. Please try again.');
+            
+            // Mark any pending notes as failed
             setVoiceNotes(prev => prev.map(note => 
                 note.sender.name === 'You' && note.status === 'sent' 
                     ? { ...note, status: 'failed' }
