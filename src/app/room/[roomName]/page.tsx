@@ -83,12 +83,12 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const roomName = params.roomName;
 
     const bufferToWav = useCallback((abuffer: AudioBuffer): ArrayBuffer => {
-        const numOfChan = abuffer.numberOfChannels,
-            length = abuffer.length * numOfChan * 2 + 44,
-            buffer = new ArrayBuffer(length),
-            view = new DataView(buffer);
+        const numOfChan = abuffer.numberOfChannels;
+        const length = abuffer.length * numOfChan * 2 + 44;
+        const buffer = new ArrayBuffer(length);
+        const view = new DataView(buffer);
         const channels: Float32Array[] = [];
-        let i, sample, offset = 0, pos = 0;
+        let i: number, sample: number, offset = 0, pos = 0;
 
         const setUint16 = (data: number) => { view.setUint16(pos, data, true); pos += 2; }
         const setUint32 = (data: number) => { view.setUint32(pos, data, true); pos += 4; }
@@ -214,8 +214,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                             id: packet.noteId,
                             sender: { id: participant.sid, name: participant.identity },
                             audioUrl, timestamp: Date.now(), isPlaying: false,
-                            status: 'delivered', 
-                            effectId: packet.effectId,
+                            status: 'delivered'
                         };
                         setVoiceNotes(prev => [newNote, ...prev]);
                         delete receivedChunksRef.current[packet.noteId];
@@ -287,17 +286,16 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             const base64Audio = arrayBufferToBase64(rawAudioBuffer);
             const noteId = `vn-${Date.now()}-${room.localParticipant.identity}`;
             const totalChunks = Math.ceil(base64Audio.length / CHUNK_SIZE);
-            const effectId = selectedVoice;
-
+            
             for (let i = 0; i < totalChunks; i++) {
                 const chunk = base64Audio.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-                await broadcastPacket({type: 'voice-chunk', noteId, chunk, index: i, total: totalChunks, effectId});
+                await broadcastPacket({type: 'voice-chunk', noteId, chunk, index: i, total: totalChunks });
             }
             
             const audioUrl = URL.createObjectURL(processedBlob);
             const newNote: VoiceNote = {
                 id: noteId, sender: { id: room.localParticipant.sid, name: 'You' },
-                audioUrl, timestamp: Date.now(), isPlaying: false, status: 'sent', effectId: selectedVoice,
+                audioUrl, timestamp: Date.now(), isPlaying: false, status: 'sent',
             };
             setVoiceNotes(prev => [newNote, ...prev]);
 
