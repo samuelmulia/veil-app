@@ -317,11 +317,12 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         if (!lastRecording.blob || !room) return;
         setRecordingStatus('sending');
         try {
-            const arrayBuffer = await lastRecording.blob.arrayBuffer();
-            const base64Audio = arrayBufferToBase64(arrayBuffer);
+            const rawAudioBuffer = await lastRecording.blob.arrayBuffer();
+            const base64Audio = arrayBufferToBase64(rawAudioBuffer);
             const noteId = `vn-${Date.now()}-${room.localParticipant.identity}`;
             const totalChunks = Math.ceil(base64Audio.length / CHUNK_SIZE);
 
+            // Send all the chunks
             for (let i = 0; i < totalChunks; i++) {
                 const chunk = base64Audio.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
                 const packet: Packet = {
@@ -336,10 +337,23 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                 await room.localParticipant.publishData(data, { reliable: true });
             }
             
+            // Send the end packet with metadata
             const endPacket: Packet = { type: 'voice-end', noteId, total: totalChunks, effectId: selectedVoice };
             const encoder = new TextEncoder();
             const data = encoder.encode(JSON.stringify(endPacket));
             await room.localParticipant.publishData(data, { reliable: true });
+
+            // FIX: Add the note to the sender's own UI
+            const processedBlob = await applyVoiceEffect(rawAudioBuffer, selectedVoice);
+            const audioUrl = URL.createObjectURL(processedBlob);
+            const newNote: VoiceNote = {
+                id: noteId,
+                sender: 'You',
+                audioUrl,
+                timestamp: Date.now(),
+                isPlaying: false
+            };
+            setVoiceNotes(prev => [newNote, ...prev]);
 
         } catch (error) {
             console.error("Error sending voice note:", error);
@@ -576,3 +590,4 @@ const SendIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" 
 const XIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"></path> </svg> );
 const MessageSquareIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"></path> </svg> );
 const UsersIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}><path strokeLinecap="round" strokeLinejoin="round" d="M18 18v-5.25m0 0a3 3 0 00-3-3m3 3a3 3 0 00-3-3m-3 3a3 3 0 00-3-3m3 3a3 3 0 00-3-3m-3 3a3 3 0 00-3-3m3 3a3 3 0 00-3-3m0 9.75V18m0-9.75a3 3 0 013-3m-3 3a3 3 0 00-3 3m3-3a3 3 0 013-3m-3 3a3 3 0 00-3 3m6.75 3.375c.621 1.278 1.694 2.34 2.873 3.118a48.455 48.455 0 01-5.746 0c1.179-.778 2.252-1.84 2.873-3.118z"></path></svg>);
+
