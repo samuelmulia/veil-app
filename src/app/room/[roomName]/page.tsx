@@ -12,6 +12,7 @@ import {
   LocalParticipant,
   RemoteParticipant,
   RemoteTrackPublication,
+  TrackPublication,
 } from 'livekit-client';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -268,19 +269,8 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         };
 
         const handleTrackPublished = (publication: RemoteTrackPublication, participant: RemoteParticipant) => {
-            if (publication.kind === 'audio') {
-                if (!publication.isSubscribed) {
-                    publication.setSubscribed(true);
-                } else if (publication.track) {
-                    // Handle edge case where track is already subscribed but element is missing
-                    handleTrackSubscribed(publication.track, publication, participant);
-                }
-            }
-        };
-
-        const handleTrackUnpublished = (publication: RemoteTrackPublication, participant: RemoteParticipant) => {
-            if (publication.track) {
-                handleTrackUnsubscribed(publication.track, publication, participant);
+            if (publication.kind === 'audio' && !publication.isSubscribed) {
+                participant.setTrackSubscribed(publication.trackSid, true);
             }
         };
         
@@ -289,11 +279,8 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         room.remoteParticipants.forEach(p => {
             p.getTrackPublications().forEach(pub => {
                 if(pub.kind === 'audio' && !pub.isSubscribed) {
-                    try {
-                        pub.setSubscribed(true);
-                    } catch (e) {
-                        console.error('Failed to subscribe to existing track', e);
-                    }
+                    // FIX: Use participant.setTrackSubscribed instead of pub.setSubscribed
+                    p.setTrackSubscribed(pub.trackSid, true);
                 }
             });
         });
@@ -305,17 +292,9 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
         room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
         room.on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
         room.on(RoomEvent.TrackPublished, handleTrackPublished);
-        room.on(RoomEvent.TrackUnpublished, handleTrackUnpublished);
 
         return () => {
-            room.off(RoomEvent.ParticipantConnected, updateParticipantsList);
-            room.off(RoomEvent.ParticipantDisconnected, updateParticipantsList);
-            room.off(RoomEvent.ConnectionStateChanged, setConnectionState);
-            room.off(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
-            room.off(RoomEvent.TrackSubscribed, handleTrackSubscribed);
-            room.off(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
-            room.off(RoomEvent.TrackPublished, handleTrackPublished);
-            room.off(RoomEvent.TrackUnpublished, handleTrackUnpublished);
+            room.removeAllListeners();
         };
     }, [room]);
     
