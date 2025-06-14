@@ -82,6 +82,67 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     
     const router = useRouter();
     const roomName = params.roomName;
+
+    // --- Audio Processing Logic (moved inside component) ---
+    const bufferToWav = useCallback((abuffer: AudioBuffer): ArrayBuffer => {
+        const numOfChan = abuffer.numberOfChannels;
+        const length = abuffer.length * numOfChan * 2 + 44;
+        const buffer = new ArrayBuffer(length);
+        const view = new DataView(buffer);
+        const channels: Float32Array[] = [];
+        let i, sample, offset = 0, pos = 0;
+
+        const setUint16 = (data: number) => { view.setUint16(pos, data, true); pos += 2; }
+        const setUint32 = (data: number) => { view.setUint32(pos, data, true); pos += 4; }
+
+        setUint32(0x46464952); setUint32(length - 8); setUint32(0x45564157);
+        setUint32(0x20746d66); setUint32(16); setUint16(1); setUint16(numOfChan);
+        setUint32(abuffer.sampleRate); setUint32(abuffer.sampleRate * 2 * numOfChan);
+        setUint16(numOfChan * 2); setUint16(16); setUint32(0x61746164);
+        setUint32(length - pos - 4);
+
+        for (i = 0; i < abuffer.numberOfChannels; i++) channels.push(abuffer.getChannelData(i));
+
+        while (pos < length) {
+            for (i = 0; i < numOfChan; i++) {
+                sample = Math.max(-1, Math.min(1, channels[i][offset]));
+                sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0;
+                view.setInt16(pos, sample, true);
+                pos += 2;
+            }
+            offset++;
+        }
+        return buffer;
+    }, []);
+
+    const applyVoiceEffect = useCallback(async (audioBuffer: ArrayBuffer, effectId: string): Promise<Blob> => {
+        const audioContext = new AudioContext();
+        const sourceAudioBuffer = await audioContext.decodeAudioData(audioBuffer.slice(0));
+        
+        const offlineContext = new OfflineAudioContext(
+            sourceAudioBuffer.numberOfChannels,
+            sourceAudioBuffer.length,
+            sourceAudioBuffer.sampleRate
+        );
+        const source = offlineContext.createBufferSource();
+        source.buffer = sourceAudioBuffer;
+        
+        let pitchRate = 1.0;
+        switch (effectId) {
+            case 'budi': pitchRate = 0.85; break;
+            case 'joko': pitchRate = 0.75; break;
+            case 'agung': pitchRate = 0.65; break;
+            case 'citra': pitchRate = 1.4; break;
+            case 'rini': pitchRate = 1.6; break;
+            default: pitchRate = 1.0; break;
+        }
+        source.playbackRate.value = pitchRate;
+        source.connect(offlineContext.destination);
+        source.start(0);
+        const renderedBuffer = await offlineContext.startRendering();
+        const wavBuffer = bufferToWav(renderedBuffer);
+        return new Blob([wavBuffer], { type: 'audio/wav' });
+    }, [bufferToWav]);
     
     const handleEnterRoom = async () => {
         setConnectionError(null);
@@ -89,10 +150,8 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         
         try {
             await navigator.mediaDevices.getUserMedia({ audio: true });
-
             const resp = await fetch(`/api/token?roomName=${roomName}&identity=${identity}`);
             if (!resp.ok) throw new Error('Failed to get token');
-
             const { token } = await resp.json();
             const newRoom = new Room();
             const wsUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
@@ -110,8 +169,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const broadcastPacket = useCallback(async (packet: Packet) => {
         if (!room) return;
         try {
-            const encoder = new TextEncoder();
-            const data = encoder.encode(JSON.stringify(packet));
+            const data = new TextEncoder().encode(JSON.stringify(packet));
             await room.localParticipant.publishData(data, { reliable: true });
         } catch (error) {
             console.error("Failed to broadcast packet:", error);
@@ -125,7 +183,6 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             setConnectionNotification(message);
             setTimeout(() => setConnectionNotification(null), 3000);
         }
-
         const handleParticipantUpdate = () => setParticipants([room.localParticipant, ...room.remoteParticipants.values()]);
         const handleParticipantConnected = (p: Participant) => { showNotification(`${p.identity} joined.`); handleParticipantUpdate(); };
         const handleParticipantDisconnected = (p: Participant) => { 
@@ -155,11 +212,8 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                         const newNote: VoiceNote = {
                             id: packet.noteId,
                             sender: { id: participant.sid, name: participant.identity },
-                            audioUrl,
-                            timestamp: Date.now(),
-                            isPlaying: false,
-                            status: 'delivered',
-                            effectId: noteData.effectId
+                            audioUrl, timestamp: Date.now(), isPlaying: false,
+                            status: 'delivered', effectId: noteData.effectId
                         };
                         setVoiceNotes(prev => [newNote, ...prev]);
                         delete receivedChunksRef.current[packet.noteId];
@@ -209,8 +263,6 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             };
             mediaRecorderRef.current.start();
         } catch (error) {
-            console.error("Error starting recording:", error);
-            setConnectionError("Could not start recording.");
             setRecordingStatus('idle');
             broadcastPacket({ type: 'status', status: 'idle' });
         }
@@ -241,10 +293,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                 id: noteId,
                 sender: { id: room.localParticipant.sid, name: 'You' },
                 audioUrl: lastRecording.url!,
-                timestamp: Date.now(),
-                isPlaying: false,
-                status: 'sent',
-                effectId: selectedVoice,
+                timestamp: Date.now(), isPlaying: false, status: 'sent', effectId: selectedVoice,
             };
             setVoiceNotes(prev => [newNote, ...prev]);
 
@@ -269,7 +318,9 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
 
         if (audioPlayerRef.current && !audioPlayerRef.current.paused) {
             audioPlayerRef.current.pause();
-            if (audioPlayerRef.current.src === noteToPlay.audioUrl) {
+            if (audioPlayerRef.current.src.startsWith('blob:')) { // only check for our created audio urls
+                 if (noteToPlay.audioUrl === audioPlayerRef.current.src.substring(audioPlayerRef.current.src.lastIndexOf('blob:')+5)) return;
+            } else if (audioPlayerRef.current.src === noteToPlay.audioUrl) {
                 return;
             }
         }
@@ -292,7 +343,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
              setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: false} : n));
         };
         newAudio.play();
-    }, [voiceNotes, broadcastPacket]);
+    }, [voiceNotes, broadcastPacket, applyVoiceEffect]);
     
     const handleDeleteNote = useCallback((noteId: string) => {
         setVoiceNotes(prev => prev.filter(n => n.id !== noteId));
