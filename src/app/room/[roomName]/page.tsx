@@ -460,32 +460,32 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                         console.log(`Chunk ${packet.index + 1}/${packet.total} received for ${packet.noteId} (${received}/${packet.total})`);
                         break;
                         
-                    case 'voice-end':
+                        case 'voice-end':
                         const chunks = receivedChunksRef.current[packet.noteId];
                         if (chunks && chunks.length === packet.totalChunks) {
                             const validChunks = chunks.filter(c => c !== null && c !== undefined);
                             console.log(`Voice-end received: Expected ${packet.totalChunks}, got ${validChunks.length} valid chunks`);
                             
                             if (validChunks.length === packet.totalChunks && chunks.every(c => c !== null && c !== undefined)) {
-                            
-                            const fullBase64 = chunks.join('');
-                            const audioBuffer = EncodingUtils.base64ToArrayBuffer(fullBase64);
-                            const audioBlob = new Blob([audioBuffer], { type: 'audio/wav' });
-                            const audioUrl = URL.createObjectURL(audioBlob);
-                            
-                            const newNote: VoiceNote = {
-                                id: packet.noteId,
-                                sender: { id: participant.sid, name: participant.identity },
-                                audioUrl,
-                                timestamp: Date.now(),
-                                isPlaying: false,
-                                status: 'delivered',
-                                duration: packet.duration
-                            };
-                            
-                            setVoiceNotes(prev => [newNote, ...prev]);
-                            delete receivedChunksRef.current[packet.noteId];
-                            broadcastPacket({ type: 'status-update', noteId: newNote.id, status: 'delivered' });
+                                const fullBase64 = chunks.join('');
+                                const audioBuffer = EncodingUtils.base64ToArrayBuffer(fullBase64);
+                                const audioBlob = new Blob([audioBuffer], { type: 'audio/wav' });
+                                const audioUrl = URL.createObjectURL(audioBlob);
+                                
+                                const newNote: VoiceNote = {
+                                    id: packet.noteId,
+                                    sender: { id: participant.sid, name: participant.identity },
+                                    audioUrl,
+                                    timestamp: Date.now(),
+                                    isPlaying: false,
+                                    status: 'delivered',
+                                    duration: packet.duration
+                                };
+                                
+                                setVoiceNotes(prev => [newNote, ...prev]);
+                                delete receivedChunksRef.current[packet.noteId];
+                                broadcastPacket({ type: 'status-update', noteId: newNote.id, status: 'delivered' });
+                            }
                         }
                         break;
                         
