@@ -7,10 +7,18 @@ import {
   RoomEvent,
   Participant,
   ConnectionState,
-  RemoteParticipant,
   DataPacket_Kind,
 } from 'livekit-client';
 import { AnimatePresence, motion } from 'framer-motion';
+
+// --- Voice Options Data ---
+const voiceOptions = [
+    { id: 'original', name: 'Original Voice' },
+    { id: 'agent_alpha', name: 'Agent Alpha (Deep)' },
+    { id: 'agent_delta', name: 'Agent Delta (High)' },
+    { id: 'synthetic', name: 'Synthetic (Robot)' },
+    { id: 'spectral', name: 'Spectral (Radio)' },
+];
 
 // --- Types ---
 type VoiceNote = {
@@ -21,6 +29,125 @@ type VoiceNote = {
     isPlaying: boolean;
 };
 
+// --- Audio Processing Utility ---
+async function applyVoiceEffect(audioBlob: Blob, effectId: string): Promise<ArrayBuffer> {
+    if (effectId === 'original') {
+        return audioBlob.arrayBuffer();
+    }
+
+    const audioContext = new AudioContext();
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+    const source = audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+
+    let pitchRate = 1.0;
+    let filter: BiquadFilterNode | null = null;
+
+    switch (effectId) {
+        case 'agent_alpha':
+            pitchRate = 0.75;
+            break;
+        case 'agent_delta':
+            pitchRate = 1.5;
+            break;
+        case 'synthetic':
+            pitchRate = 0.9;
+            filter = audioContext.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 1000;
+            break;
+        case 'spectral':
+            filter = audioContext.createBiquadFilter();
+            filter.type = 'bandpass';
+            filter.frequency.value = 1500;
+            filter.Q.value = 5;
+            break;
+    }
+    
+    source.playbackRate.value = pitchRate;
+
+    const offlineContext = new OfflineAudioContext(
+        audioBuffer.numberOfChannels,
+        audioBuffer.length,
+        audioBuffer.sampleRate
+    );
+    
+    const offlineSource = offlineContext.createBufferSource();
+    offlineSource.buffer = audioBuffer;
+    offlineSource.playbackRate.value = pitchRate;
+
+    if (filter) {
+        offlineSource.connect(filter);
+        filter.connect(offlineContext.destination);
+    } else {
+        offlineSource.connect(offlineContext.destination);
+    }
+
+    offlineSource.start(0);
+    const renderedBuffer = await offlineContext.startRendering();
+    
+    // Convert rendered buffer to WAV format to send
+    return bufferToWav(renderedBuffer);
+}
+
+// Helper to convert AudioBuffer to a WAV ArrayBuffer
+function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
+    const numOfChan = abuffer.numberOfChannels;
+    const length = abuffer.length * numOfChan * 2 + 44;
+    const buffer = new ArrayBuffer(length);
+    const view = new DataView(buffer);
+    const channels = [];
+    let i, sample;
+    let offset = 0;
+    let pos = 0;
+
+    // write WAVE header
+    setUint32(0x46464952); // "RIFF"
+    setUint32(length - 8); // file length - 8
+    setUint32(0x45564157); // "WAVE"
+
+    setUint32(0x20746d66); // "fmt " chunk
+    setUint32(16); // length = 16
+    setUint16(1); // PCM (uncompressed)
+    setUint16(numOfChan);
+    setUint32(abuffer.sampleRate);
+    setUint32(abuffer.sampleRate * 2 * numOfChan); // avg. bytes/sec
+    setUint16(numOfChan * 2); // block-align
+    setUint16(16); // 16-bit
+
+    setUint32(0x61746164); // "data" - chunk
+    setUint32(length - pos - 4); // chunk length
+
+    // write interleaved data
+    for (i = 0; i < abuffer.numberOfChannels; i++)
+        channels.push(abuffer.getChannelData(i));
+
+    while (pos < length) {
+        for (i = 0; i < numOfChan; i++) {
+            sample = Math.max(-1, Math.min(1, channels[i][offset])); // clamp
+            sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0; // scale to 16-bit signed int
+            view.setInt16(pos, sample, true); // write 16-bit sample
+            pos += 2;
+        }
+        offset++;
+    }
+
+    return buffer;
+
+    function setUint16(data: number) {
+        view.setUint16(pos, data, true);
+        pos += 2;
+    }
+
+    function setUint32(data: number) {
+        view.setUint32(pos, data, true);
+        pos += 4;
+    }
+}
+
+
 // --- Main Page Component ---
 export default function VoiceNotesPage({ params }: { params: { roomName:string } }) {
     const [isInLobby, setIsInLobby] = useState(true);
@@ -29,9 +156,11 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const [connectionError, setConnectionError] = useState<string | null>(null);
     const [voiceNotes, setVoiceNotes] = useState<VoiceNote[]>([]);
     const [isRecording, setIsRecording] = useState(false);
+    const [selectedVoice, setSelectedVoice] = useState('original');
 
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
+    const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
     
     const router = useRouter();
     const roomName = params.roomName;
@@ -78,7 +207,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
 
         const handleDataReceived = async (payload: Uint8Array, participant?: Participant) => {
             try {
-                const blob = new Blob([payload], { type: 'audio/webm' });
+                const blob = new Blob([payload], { type: 'audio/wav' });
                 const audioUrl = URL.createObjectURL(blob);
                 const newNote: VoiceNote = {
                     id: `vn-${Date.now()}-${Math.random()}`,
@@ -117,14 +246,13 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
 
             mediaRecorderRef.current.onstop = async () => {
                 const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-                const arrayBuffer = await audioBlob.arrayBuffer();
                 
+                const processedArrayBuffer = await applyVoiceEffect(audioBlob, selectedVoice);
+
                 if (room) {
-                    // FIX: Convert ArrayBuffer to Uint8Array before publishing
-                    await room.localParticipant.publishData(new Uint8Array(arrayBuffer), DataPacket_Kind.RELIABLE);
+                    await room.localParticipant.publishData(new Uint8Array(processedArrayBuffer), { reliable: true });
                 }
                 
-                // Clean up stream tracks
                 stream.getTracks().forEach(track => track.stop());
             };
 
@@ -144,16 +272,28 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     };
 
     const handlePlayPause = (noteId: string) => {
-        setVoiceNotes(prev => prev.map(note => {
-            if (note.id === noteId) {
-                const audio = new Audio(note.audioUrl);
-                if (!note.isPlaying) {
-                    audio.play();
-                } 
-                return { ...note, isPlaying: !note.isPlaying };
+        const noteToPlay = voiceNotes.find(n => n.id === noteId);
+        if (!noteToPlay) return;
+
+        if (audioPlayerRef.current && !audioPlayerRef.current.paused) {
+            audioPlayerRef.current.pause();
+            if (audioPlayerRef.current.src === noteToPlay.audioUrl) {
+                setVoiceNotes(prev => prev.map(n => ({ ...n, isPlaying: false })));
+                return;
             }
-            return { ...note, isPlaying: false }; 
-        }));
+        }
+        
+        const newAudio = new Audio(noteToPlay.audioUrl);
+        audioPlayerRef.current = newAudio;
+        
+        newAudio.onplay = () => {
+             setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: true} : {...n, isPlaying: false}));
+        };
+        newAudio.onpause = newAudio.onended = () => {
+             setVoiceNotes(prev => prev.map(n => n.id === noteId ? {...n, isPlaying: false} : n));
+        };
+
+        newAudio.play();
     };
     
     return (
@@ -164,6 +304,8 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                   connectionError={connectionError}
                   roomName={roomName}
                   isConnecting={room?.state === ConnectionState.Connecting}
+                  selectedVoice={selectedVoice}
+                  setSelectedVoice={setSelectedVoice}
                 />
             ) : (
                 <InCall
@@ -182,13 +324,17 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
 }
 
 // --- UI Components ---
-const Lobby = ({ onEnterRoom, connectionError, roomName, isConnecting }: any) => {
+const Lobby = ({ onEnterRoom, connectionError, roomName, isConnecting, selectedVoice, setSelectedVoice }: any) => {
   return (
     <div className="flex-1 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
         <div className="bg-[#111] p-8 rounded-2xl flex flex-col border border-[#222]">
           <h2 className="text-2xl font-bold mb-2 text-center">Voice Notes Room</h2>
           <p className="text-center text-gray-400 mb-8">Room: <span className="font-bold text-white">{roomName}</span></p>
+            <div className="mb-8 flex-grow">
+                <h3 className="text-lg font-semibold mb-3 text-center">Choose Your Anonymous Voice</h3>
+                <VoiceOptions selectedVoice={selectedVoice} setSelectedVoice={setSelectedVoice} />
+            </div>
             {connectionError && (
               <div className="bg-red-900/50 border border-red-500/50 text-red-200 p-3 rounded-lg mb-4 text-sm text-center">
                 <strong>Connection Failed:</strong> {connectionError}
@@ -278,6 +424,23 @@ const InCall = ({ roomName, participants, voiceNotes, isRecording, onStartRecord
     );
 };
 
+const VoiceOptions = React.memo(function VoiceOptions({ selectedVoice, setSelectedVoice }: any) {
+    return (
+        <div className="space-y-2">
+            {voiceOptions.map((option) => (
+                <div
+                    key={option.id}
+                    onClick={() => setSelectedVoice(option.id)}
+                    className={`voice-option cursor-pointer p-3 rounded-lg border-l-4 flex items-center justify-between transition-colors ${selectedVoice === option.id ? 'selected bg-[#2a2a2a] border-white' : 'border-transparent hover:bg-[#1a1a1a]'}`}
+                >
+                    <span>{option.name}</span>
+                    <MicIcon className="w-5 h-5 text-gray-400" />
+                </div>
+            ))}
+        </div>
+    );
+});
+
 
 // --- SVG Icons ---
 const MicIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"></path> </svg> );
@@ -286,4 +449,3 @@ const PauseIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor"
 const CheckIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path> </svg> );
 const CopyIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"></path> </svg> );
 const MessageSquareIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"></path> </svg> );
-
