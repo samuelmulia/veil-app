@@ -5,8 +5,8 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Veil - Anonymous Conversations",
-  description: "No accounts. No tracking. Just secure voice calls with real-time voice transformation.",
+  title: "Anonymous Conversations",
+  description: "No accounts. No tracking. Just P2P secure voice notes with real-time, AI-generated voice transformation.",
 };
 
 export default function RootLayout({
