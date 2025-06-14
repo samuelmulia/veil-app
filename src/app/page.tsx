@@ -23,10 +23,10 @@ export default function HomePage() {
     <main className="flex flex-col items-center justify-center min-h-screen p-4 text-center antialiased">
       <div className="max-w-4xl">
         <h1 className="text-5xl md:text-7xl font-black gradient-text leading-tight">
-          Anonymous Conversations, Uncompromised Clarity.
+          Anonymous Conversations, Uncompromised Privacy.
         </h1>
         <p className="mt-6 text-lg md:text-xl text-gray-400 max-w-2xl mx-auto">
-          No accounts. No tracking. Just secure voice calls with real-time voice transformation.
+          No accounts. No tracking. Just P2P secure voice notes with real-time, AI-generated voice transformation — built on serverless architecture, with nothing stored.
         </p>
       </div>
       <div className="mt-12 space-y-4">
