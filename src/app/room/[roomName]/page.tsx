@@ -29,21 +29,33 @@ type VoiceNote = {
     isPlaying: boolean;
 };
 
+type VoiceNotePacket = {
+    effectId: string;
+    audioBuffer: ArrayBuffer;
+};
+
+
 // --- Audio Processing Utility ---
-async function applyVoiceEffect(audioBlob: Blob, effectId: string): Promise<ArrayBuffer> {
+async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Promise<Blob> {
+    const audioContext = new AudioContext();
+    const sourceAudioBuffer = await audioContext.decodeAudioData(audioBuffer.slice(0));
+
     if (effectId === 'original') {
-        return audioBlob.arrayBuffer();
+        return new Blob([audioBuffer], { type: 'audio/webm' });
     }
 
-    const audioContext = new AudioContext();
-    const arrayBuffer = await audioBlob.arrayBuffer();
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    const offlineContext = new OfflineAudioContext(
+        sourceAudioBuffer.numberOfChannels,
+        sourceAudioBuffer.length,
+        sourceAudioBuffer.sampleRate
+    );
 
-    const source = audioContext.createBufferSource();
-    source.buffer = audioBuffer;
-
+    const source = offlineContext.createBufferSource();
+    source.buffer = sourceAudioBuffer;
+    
     let pitchRate = 1.0;
     let filter: BiquadFilterNode | null = null;
+    let lastNode: AudioNode = source;
 
     switch (effectId) {
         case 'agent_alpha':
@@ -54,56 +66,43 @@ async function applyVoiceEffect(audioBlob: Blob, effectId: string): Promise<Arra
             break;
         case 'synthetic':
             pitchRate = 0.9;
-            filter = audioContext.createBiquadFilter();
+            filter = offlineContext.createBiquadFilter();
             filter.type = 'lowpass';
             filter.frequency.value = 1000;
             break;
         case 'spectral':
-            filter = audioContext.createBiquadFilter();
+            filter = offlineContext.createBiquadFilter();
             filter.type = 'bandpass';
             filter.frequency.value = 1500;
             filter.Q.value = 5;
             break;
     }
-    
+
     source.playbackRate.value = pitchRate;
 
-    const offlineContext = new OfflineAudioContext(
-        audioBuffer.numberOfChannels,
-        audioBuffer.length,
-        audioBuffer.sampleRate
-    );
-    
-    const offlineSource = offlineContext.createBufferSource();
-    offlineSource.buffer = audioBuffer;
-    offlineSource.playbackRate.value = pitchRate;
-
     if (filter) {
-        offlineSource.connect(filter);
-        filter.connect(offlineContext.destination);
-    } else {
-        offlineSource.connect(offlineContext.destination);
+        lastNode.connect(filter);
+        lastNode = filter;
     }
-
-    offlineSource.start(0);
-    const renderedBuffer = await offlineContext.startRendering();
     
-    // Convert rendered buffer to WAV format to send
-    return bufferToWav(renderedBuffer);
+    lastNode.connect(offlineContext.destination);
+    
+    source.start(0);
+    const renderedBuffer = await offlineContext.startRendering();
+    const wavBuffer = bufferToWav(renderedBuffer);
+    return new Blob([wavBuffer], { type: 'audio/wav' });
 }
 
-// Helper to convert AudioBuffer to a WAV ArrayBuffer
 function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
-    const numOfChan = abuffer.numberOfChannels;
-    const length = abuffer.length * numOfChan * 2 + 44;
-    const buffer = new ArrayBuffer(length);
-    const view = new DataView(buffer);
-    const channels = [];
-    let i, sample;
-    let offset = 0;
-    let pos = 0;
+    const numOfChan = abuffer.numberOfChannels,
+        length = abuffer.length * numOfChan * 2 + 44,
+        buffer = new ArrayBuffer(length),
+        view = new DataView(buffer),
+        channels = [],
+        sample,
+        offset = 0,
+        pos = 0;
 
-    // write WAVE header
     setUint32(0x46464952); // "RIFF"
     setUint32(length - 8); // file length - 8
     setUint32(0x45564157); // "WAVE"
@@ -120,31 +119,22 @@ function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
     setUint32(0x61746164); // "data" - chunk
     setUint32(length - pos - 4); // chunk length
 
-    // write interleaved data
-    for (i = 0; i < abuffer.numberOfChannels; i++)
+    for (let i = 0; i < abuffer.numberOfChannels; i++)
         channels.push(abuffer.getChannelData(i));
 
     while (pos < length) {
-        for (i = 0; i < numOfChan; i++) {
-            sample = Math.max(-1, Math.min(1, channels[i][offset])); // clamp
-            sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0; // scale to 16-bit signed int
-            view.setInt16(pos, sample, true); // write 16-bit sample
+        for (let i = 0; i < numOfChan; i++) {
+            sample = Math.max(-1, Math.min(1, channels[i][offset]));
+            sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0;
+            view.setInt16(pos, sample, true);
             pos += 2;
         }
         offset++;
     }
-
     return buffer;
 
-    function setUint16(data: number) {
-        view.setUint16(pos, data, true);
-        pos += 2;
-    }
-
-    function setUint32(data: number) {
-        view.setUint32(pos, data, true);
-        pos += 4;
-    }
+    function setUint16(data: number) { view.setUint16(pos, data, true); pos += 2; }
+    function setUint32(data: number) { view.setUint32(pos, data, true); pos += 4; }
 }
 
 
@@ -207,8 +197,14 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
 
         const handleDataReceived = async (payload: Uint8Array, participant?: Participant) => {
             try {
-                const blob = new Blob([payload], { type: 'audio/wav' });
-                const audioUrl = URL.createObjectURL(blob);
+                const decoder = new TextDecoder();
+                const packet = JSON.parse(decoder.decode(payload));
+                
+                const audioBuffer = new Uint8Array(packet.audioBuffer.data).buffer;
+                
+                const processedBlob = await applyVoiceEffect(audioBuffer, packet.effectId);
+                const audioUrl = URL.createObjectURL(processedBlob);
+
                 const newNote: VoiceNote = {
                     id: `vn-${Date.now()}-${Math.random()}`,
                     sender: participant?.identity || 'Unknown',
@@ -246,11 +242,17 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
 
             mediaRecorderRef.current.onstop = async () => {
                 const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-                
-                const processedArrayBuffer = await applyVoiceEffect(audioBlob, selectedVoice);
+                const arrayBuffer = await audioBlob.arrayBuffer();
 
+                const packet: VoiceNotePacket = {
+                    effectId: selectedVoice,
+                    audioBuffer: arrayBuffer,
+                };
+                
                 if (room) {
-                    await room.localParticipant.publishData(new Uint8Array(processedArrayBuffer), { reliable: true });
+                    const encoder = new TextEncoder();
+                    const data = encoder.encode(JSON.stringify(packet));
+                    await room.localParticipant.publishData(data, { reliable: true });
                 }
                 
                 stream.getTracks().forEach(track => track.stop());
