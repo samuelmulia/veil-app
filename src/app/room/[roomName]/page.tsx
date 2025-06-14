@@ -94,15 +94,18 @@ async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Pro
 }
 
 function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
-    const numOfChan = abuffer.numberOfChannels,
-        length = abuffer.length * numOfChan * 2 + 44,
-        buffer = new ArrayBuffer(length),
-        view = new DataView(buffer),
-        channels = [],
-        sample,
-        offset = 0,
-        pos = 0;
+    const numOfChan = abuffer.numberOfChannels;
+    const length = abuffer.length * numOfChan * 2 + 44;
+    const buffer = new ArrayBuffer(length);
+    const view = new DataView(buffer);
+    const channels: Float32Array[] = [];
+    // FIX: Changed declarations from a single 'const' block to individual 'let' for mutable variables.
+    let i;
+    let sample;
+    let offset = 0;
+    let pos = 0;
 
+    // write WAVE header
     setUint32(0x46464952); // "RIFF"
     setUint32(length - 8); // file length - 8
     setUint32(0x45564157); // "WAVE"
@@ -119,14 +122,15 @@ function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
     setUint32(0x61746164); // "data" - chunk
     setUint32(length - pos - 4); // chunk length
 
-    for (let i = 0; i < abuffer.numberOfChannels; i++)
+    // write interleaved data
+    for (i = 0; i < abuffer.numberOfChannels; i++)
         channels.push(abuffer.getChannelData(i));
 
     while (pos < length) {
-        for (let i = 0; i < numOfChan; i++) {
-            sample = Math.max(-1, Math.min(1, channels[i][offset]));
-            sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0;
-            view.setInt16(pos, sample, true);
+        for (i = 0; i < numOfChan; i++) {
+            sample = Math.max(-1, Math.min(1, channels[i][offset])); // clamp
+            sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0; // scale to 16-bit signed int
+            view.setInt16(pos, sample, true); // write 16-bit sample
             pos += 2;
         }
         offset++;
@@ -197,10 +201,11 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
 
         const handleDataReceived = async (payload: Uint8Array, participant?: Participant) => {
             try {
-                const decoder = new TextDecoder();
+                const decoder = new TextDecoder("utf-8", { fatal: true });
                 const packet = JSON.parse(decoder.decode(payload));
                 
-                const audioBuffer = new Uint8Array(packet.audioBuffer.data).buffer;
+                // Reconstruct ArrayBuffer from the plain object
+                const audioBuffer = new Uint8Array(Object.values(packet.audioBuffer)).buffer;
                 
                 const processedBlob = await applyVoiceEffect(audioBuffer, packet.effectId);
                 const audioUrl = URL.createObjectURL(processedBlob);
@@ -244,9 +249,9 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                 const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
                 const arrayBuffer = await audioBlob.arrayBuffer();
 
-                const packet: VoiceNotePacket = {
+                const packet = {
                     effectId: selectedVoice,
-                    audioBuffer: arrayBuffer,
+                    audioBuffer: Array.from(new Uint8Array(arrayBuffer)), // Convert to array for JSON serialization
                 };
                 
                 if (room) {
