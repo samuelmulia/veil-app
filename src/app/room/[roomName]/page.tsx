@@ -16,11 +16,11 @@ const CHUNK_SIZE = 16 * 1024; // 16 KB
 
 // --- Voice Options Data ---
 const voiceOptions = [
-    { id: 'original', name: 'Original Voice' },
-    { id: 'agent_alpha', name: 'Agent Alpha (Deep)' },
-    { id: 'agent_delta', name: 'Agent Delta (High)' },
-    { id: 'synthetic', name: 'Synthetic (Robot)' },
-    { id: 'spectral', name: 'Spectral (Radio)' },
+    { id: 'budi', name: 'Budi' },
+    { id: 'joko', name: 'Joko' },
+    { id: 'agung', name: 'Agung (Deep)' },
+    { id: 'citra', name: 'Citra' },
+    { id: 'rini', name: 'Rini (High)' },
 ];
 
 // --- Types ---
@@ -62,11 +62,6 @@ async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Pro
     const audioContext = new AudioContext();
     const sourceAudioBuffer = await audioContext.decodeAudioData(audioBuffer.slice(0));
 
-    if (effectId === 'original') {
-        const wavBuffer = bufferToWav(sourceAudioBuffer);
-        return new Blob([wavBuffer], { type: 'audio/wav' });
-    }
-
     const offlineContext = new OfflineAudioContext(
         sourceAudioBuffer.numberOfChannels,
         sourceAudioBuffer.length,
@@ -77,34 +72,19 @@ async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Pro
     source.buffer = sourceAudioBuffer;
     
     let pitchRate = 1.0;
-    let filter: BiquadFilterNode | null = null;
-    let lastNode: AudioNode = source;
 
     switch (effectId) {
-        case 'agent_alpha': pitchRate = 0.75; break;
-        case 'agent_delta': pitchRate = 1.5; break;
-        case 'synthetic':
-            pitchRate = 0.9;
-            filter = offlineContext.createBiquadFilter();
-            filter.type = 'lowpass';
-            filter.frequency.value = 1000;
-            break;
-        case 'spectral':
-            filter = offlineContext.createBiquadFilter();
-            filter.type = 'bandpass';
-            filter.frequency.value = 1500;
-            filter.Q.value = 5;
-            break;
+        case 'budi': pitchRate = 0.85; break;
+        case 'joko': pitchRate = 0.75; break;
+        case 'agung': pitchRate = 0.65; break;
+        case 'citra': pitchRate = 1.4; break;
+        case 'rini': pitchRate = 1.6; break;
+        default: pitchRate = 1.0; break; // Fallback
     }
 
     source.playbackRate.value = pitchRate;
-
-    if (filter) {
-        lastNode.connect(filter);
-        lastNode = filter;
-    }
+    source.connect(offlineContext.destination);
     
-    lastNode.connect(offlineContext.destination);
     source.start(0);
     const renderedBuffer = await offlineContext.startRendering();
     const wavBuffer = bufferToWav(renderedBuffer);
@@ -165,7 +145,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const [recordingStatus, setRecordingStatus] = useState<'idle' | 'recording' | 'reviewing' | 'sending'>('idle');
     const [lastRecording, setLastRecording] = useState<{ blob: Blob | null, url: string | null }>({ blob: null, url: null });
 
-    const [selectedVoice, setSelectedVoice] = useState('original');
+    const [selectedVoice, setSelectedVoice] = useState('budi'); // Default to a valid voice
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
     const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
@@ -322,7 +302,6 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             const noteId = `vn-${Date.now()}-${room.localParticipant.identity}`;
             const totalChunks = Math.ceil(base64Audio.length / CHUNK_SIZE);
 
-            // Send all the chunks
             for (let i = 0; i < totalChunks; i++) {
                 const chunk = base64Audio.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
                 const packet: Packet = {
@@ -337,13 +316,11 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                 await room.localParticipant.publishData(data, { reliable: true });
             }
             
-            // Send the end packet with metadata
             const endPacket: Packet = { type: 'voice-end', noteId, total: totalChunks, effectId: selectedVoice };
             const encoder = new TextEncoder();
             const data = encoder.encode(JSON.stringify(endPacket));
             await room.localParticipant.publishData(data, { reliable: true });
 
-            // FIX: Add the note to the sender's own UI
             const processedBlob = await applyVoiceEffect(rawAudioBuffer, selectedVoice);
             const audioUrl = URL.createObjectURL(processedBlob);
             const newNote: VoiceNote = {
