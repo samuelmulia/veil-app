@@ -120,7 +120,8 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                 const arrayBuffer = await audioBlob.arrayBuffer();
                 
                 if (room) {
-                    await room.localParticipant.publishData(arrayBuffer, DataPacket_Kind.RELIABLE);
+                    // FIX: Convert ArrayBuffer to Uint8Array before publishing
+                    await room.localParticipant.publishData(new Uint8Array(arrayBuffer), DataPacket_Kind.RELIABLE);
                 }
                 
                 // Clean up stream tracks
@@ -149,11 +150,9 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                 if (!note.isPlaying) {
                     audio.play();
                 } 
-                // Note: Pausing is tricky without storing the audio element instance.
-                // For simplicity, this implementation only handles playing.
                 return { ...note, isPlaying: !note.isPlaying };
             }
-            return { ...note, isPlaying: false }; // Stop other notes
+            return { ...note, isPlaying: false }; 
         }));
     };
     
@@ -229,8 +228,8 @@ const InCall = ({ roomName, participants, voiceNotes, isRecording, onStartRecord
                             layout
                             className="flex items-center space-x-4 p-3 mb-2 bg-[#222] rounded-lg"
                         >
-                            <button onClick={() => onPlayPause(note.id)} className="p-3 bg-blue-600 hover:bg-blue-500 rounded-full transition-colors">
-                                <PlayIcon className="w-5 h-5 text-white" />
+                            <button onClick={() => onPlayPause(note.id)} className={`p-3 rounded-full transition-colors ${note.isPlaying ? 'bg-yellow-500' : 'bg-blue-600 hover:bg-blue-500'}`}>
+                                {note.isPlaying ? <PauseIcon className="w-5 h-5 text-white" /> : <PlayIcon className="w-5 h-5 text-white" />}
                             </button>
                             <div className="flex-1">
                                 <p className="font-bold text-white">{note.sender}</p>
@@ -283,6 +282,7 @@ const InCall = ({ roomName, participants, voiceNotes, isRecording, onStartRecord
 // --- SVG Icons ---
 const MicIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"></path> </svg> );
 const PlayIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M8 5v14l11-7z"></path> </svg> );
+const PauseIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"></path> </svg> );
 const CheckIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path> </svg> );
 const CopyIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"></path> </svg> );
 const MessageSquareIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"></path> </svg> );
