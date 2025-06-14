@@ -226,6 +226,11 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
     useEffect(() => {
         if (!room) return;
 
+        const updateParticipantsList = () => {
+            console.log("Updating participants list...");
+            setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
+        };
+        
         const handleTrackSubscribed = (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
             if (track.kind === 'audio' && audioContainerRef.current) {
                 const audioElement = track.attach();
@@ -234,7 +239,7 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                 audioElementsRef.current.set(publication.trackSid, audioElement);
             }
         };
-
+        
         const handleTrackUnsubscribed = (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
             console.log(`Detaching audio for ${participant.identity}`);
             const audioElement = audioElementsRef.current.get(publication.trackSid);
@@ -243,47 +248,39 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
                 audioElementsRef.current.delete(publication.trackSid);
             }
         };
-
-        const handleTrackPublished = (publication: RemoteTrackPublication, participant: RemoteParticipant) => {
-            console.log(`Track published by ${participant.identity}`, publication);
-            if (publication.kind === 'audio' && !publication.isSubscribed) {
-                publication.setSubscribed(true);
-            }
-        };
-
+        
         const handleParticipantConnected = (participant: RemoteParticipant) => {
             console.log(`Participant connected: ${participant.identity}`);
-            setParticipants(prev => [...prev, participant]);
+            updateParticipantsList();
             
-            // FIX: Use trackPublications instead of tracks
-            participant.trackPublications.forEach(publication => {
-                if ((publication as RemoteTrackPublication).isSubscribed && publication.track) {
-                    handleTrackSubscribed(publication.track, publication as RemoteTrackPublication, participant);
+            participant.on(RoomEvent.TrackPublished, (publication: RemoteTrackPublication) => {
+                if (publication.kind === 'audio') {
+                    publication.setSubscribed(true);
                 }
             });
-
-            participant.on(RoomEvent.TrackPublished, (pub) => handleTrackPublished(pub, participant));
-            participant.on(RoomEvent.TrackSubscribed, (track, pub) => handleTrackSubscribed(track, pub, participant));
-            participant.on(RoomEvent.TrackUnsubscribed, (track, pub) => handleTrackUnsubscribed(track, pub, participant));
         };
 
         const handleParticipantDisconnected = (participant: RemoteParticipant) => {
             console.log(`Participant disconnected: ${participant.identity}`);
-            setParticipants(prev => prev.filter(p => p.sid !== participant.sid));
+            updateParticipantsList();
         };
 
-        setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
-
+        updateParticipantsList();
+        
+        room.remoteParticipants.forEach(handleParticipantConnected);
+        
         room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
         room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
         room.on(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
-        
-        room.remoteParticipants.forEach(handleParticipantConnected);
+        room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+        room.on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
 
         return () => {
             room.off(RoomEvent.ParticipantConnected, handleParticipantConnected);
             room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
             room.off(RoomEvent.ActiveSpeakersChanged, setSpeakingParticipants);
+            room.off(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+            room.off(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
         };
     }, [room]);
     
