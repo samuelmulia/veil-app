@@ -270,17 +270,18 @@ export default function RoomPage({ params }: { params: { roomName:string } }) {
 
         const handleTrackPublished = (publication: RemoteTrackPublication, participant: RemoteParticipant) => {
             if (publication.kind === 'audio' && !publication.isSubscribed) {
-                participant.setTrackSubscribed(publication.trackSid, true);
+                // The publication object itself has the setSubscribed method
+                publication.setSubscribed(true);
             }
         };
         
         updateParticipantsList();
         
         room.remoteParticipants.forEach(p => {
-            p.getTrackPublications().forEach(pub => {
+            p.trackPublications.forEach(pub => {
                 if(pub.kind === 'audio' && !pub.isSubscribed) {
-                    // FIX: Use participant.setTrackSubscribed instead of pub.setSubscribed
-                    p.setTrackSubscribed(pub.trackSid, true);
+                    // FIX: Use publication.setSubscribed
+                    (pub as RemoteTrackPublication).setSubscribed(true);
                 }
             });
         });
