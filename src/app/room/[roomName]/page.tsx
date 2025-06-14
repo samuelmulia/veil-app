@@ -11,6 +11,9 @@ import {
 } from 'livekit-client';
 import { AnimatePresence, motion } from 'framer-motion';
 
+// --- Constants ---
+const CHUNK_SIZE = 16 * 1024; // 16 KB
+
 // --- Voice Options Data ---
 const voiceOptions = [
     { id: 'original', name: 'Original Voice' },
@@ -30,7 +33,8 @@ type VoiceNote = {
 };
 
 type Packet = 
-    | { type: 'voice-note', effectId: string, audioData: string } // Base64 encoded
+    | { type: 'voice-chunk', noteId: string, chunk: string, index: number, total: number }
+    | { type: 'voice-end', noteId: string, total: number, effectId: string }
     | { type: 'status', status: 'recording' | 'idle' };
 
 // --- Base64 Helpers ---
@@ -52,7 +56,6 @@ function base64ToArrayBuffer(base64: string) {
     }
     return bytes.buffer;
 }
-
 
 // --- Audio Processing Utility ---
 async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Promise<Blob> {
@@ -102,7 +105,6 @@ async function applyVoiceEffect(audioBuffer: ArrayBuffer, effectId: string): Pro
     }
     
     lastNode.connect(offlineContext.destination);
-    
     source.start(0);
     const renderedBuffer = await offlineContext.startRendering();
     const wavBuffer = bufferToWav(renderedBuffer);
@@ -114,11 +116,9 @@ function bufferToWav(abuffer: AudioBuffer): ArrayBuffer {
     const length = abuffer.length * numOfChan * 2 + 44;
     const buffer = new ArrayBuffer(length);
     const view = new DataView(buffer);
-    // FIX: Moved channel declaration to the top of the function
     const channels: Float32Array[] = [];
     let i, sample, offset = 0, pos = 0;
 
-    // write WAVE header
     setUint32(0x46464952); // "RIFF"
     setUint32(length - 8);
     setUint32(0x45564157); // "WAVE"
@@ -169,6 +169,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
     const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+    const receivedChunksRef = useRef<Record<string, { chunks: string[], effectId: string }>>({});
     
     const router = useRouter();
     const roomName = params.roomName;
@@ -212,44 +213,43 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             setTimeout(() => setConnectionNotification(null), 3000);
         }
 
-        const handleParticipantUpdate = () => {
-             setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
-        };
-
-        const handleParticipantConnected = (participant: Participant) => {
-            showNotification(`${participant.identity} has joined.`);
+        const handleParticipantUpdate = () => setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
+        const handleParticipantConnected = (p: Participant) => { showNotification(`${p.identity} has joined.`); handleParticipantUpdate(); };
+        const handleParticipantDisconnected = (p: Participant) => { 
+            showNotification(`${p.identity} has left.`); 
             handleParticipantUpdate();
-        };
-
-        const handleParticipantDisconnected = (participant: Participant) => {
-            showNotification(`${participant.identity} has left.`);
-            handleParticipantUpdate();
-            setRecordingParticipants(prev => {
-                const newState = {...prev};
-                delete newState[participant.identity];
-                return newState;
-            })
+            setRecordingParticipants(prev => { const newState = {...prev}; delete newState[p.identity]; return newState; });
         };
 
         const handleDataReceived = async (payload: Uint8Array, participant?: Participant) => {
             if (!participant) return;
-
             try {
                 const decoder = new TextDecoder();
                 const packet = JSON.parse(decoder.decode(payload)) as Packet;
                 
-                if(packet.type === 'voice-note'){
-                    const audioBuffer = base64ToArrayBuffer(packet.audioData);
-                    const processedBlob = await applyVoiceEffect(audioBuffer, packet.effectId);
-                    const audioUrl = URL.createObjectURL(processedBlob);
-                    const newNote: VoiceNote = {
-                        id: `vn-${Date.now()}-${Math.random()}`,
-                        sender: participant.identity,
-                        audioUrl,
-                        timestamp: Date.now(),
-                        isPlaying: false
-                    };
-                    setVoiceNotes(prev => [newNote, ...prev]);
+                if (packet.type === 'voice-chunk') {
+                    if (!receivedChunksRef.current[packet.noteId]) {
+                        receivedChunksRef.current[packet.noteId] = { chunks: new Array(packet.total), effectId: '' };
+                    }
+                    receivedChunksRef.current[packet.noteId].chunks[packet.index] = packet.chunk;
+                } else if (packet.type === 'voice-end') {
+                    const noteData = receivedChunksRef.current[packet.noteId];
+                    if (noteData && noteData.chunks.every(c => c)) {
+                        noteData.effectId = packet.effectId;
+                        const fullBase64 = noteData.chunks.join('');
+                        const audioBuffer = base64ToArrayBuffer(fullBase64);
+                        const processedBlob = await applyVoiceEffect(audioBuffer, noteData.effectId);
+                        const audioUrl = URL.createObjectURL(processedBlob);
+                        const newNote: VoiceNote = {
+                            id: packet.noteId,
+                            sender: participant.identity,
+                            audioUrl,
+                            timestamp: Date.now(),
+                            isPlaying: false
+                        };
+                        setVoiceNotes(prev => [newNote, ...prev]);
+                        delete receivedChunksRef.current[packet.noteId];
+                    }
                 } else if (packet.type === 'status') {
                     setRecordingParticipants(prev => ({...prev, [participant.identity]: packet.status === 'recording'}));
                 }
@@ -319,14 +319,28 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         try {
             const arrayBuffer = await lastRecording.blob.arrayBuffer();
             const base64Audio = arrayBufferToBase64(arrayBuffer);
-            const packet: Packet = {
-                type: 'voice-note',
-                effectId: selectedVoice,
-                audioData: base64Audio,
-            };
+            const noteId = `vn-${Date.now()}-${room.localParticipant.identity}`;
+            const totalChunks = Math.ceil(base64Audio.length / CHUNK_SIZE);
+
+            for (let i = 0; i < totalChunks; i++) {
+                const chunk = base64Audio.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+                const packet: Packet = {
+                    type: 'voice-chunk',
+                    noteId,
+                    chunk,
+                    index: i,
+                    total: totalChunks,
+                };
+                const encoder = new TextEncoder();
+                const data = encoder.encode(JSON.stringify(packet));
+                await room.localParticipant.publishData(data, { reliable: true });
+            }
+            
+            const endPacket: Packet = { type: 'voice-end', noteId, total: totalChunks, effectId: selectedVoice };
             const encoder = new TextEncoder();
-            const data = encoder.encode(JSON.stringify(packet));
+            const data = encoder.encode(JSON.stringify(endPacket));
             await room.localParticipant.publishData(data, { reliable: true });
+
         } catch (error) {
             console.error("Error sending voice note:", error);
             setConnectionError("Failed to send voice note.");
@@ -439,7 +453,7 @@ const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRe
                     {participants.map((p: Participant) => (
                         <span key={p.sid} className="ml-2">
                             {p.identity}
-                            {recordingParticipants[p.identity] && <span className="ml-2 text-red-500 font-bold animate-pulse">REC</span>}
+                            {p.identity !== localParticipant?.identity && recordingParticipants[p.identity] && <span className="ml-2 text-red-500 font-bold animate-pulse">REC</span>}
                         </span>
                     ))}
                  </div>
@@ -562,4 +576,3 @@ const SendIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="currentColor" 
 const XIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"></path> </svg> );
 const MessageSquareIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}> <path strokeLinecap="round" strokeLinejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"></path> </svg> );
 const UsersIcon = (props: SVGProps<SVGSVGElement>) => ( <svg fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}><path strokeLinecap="round" strokeLinejoin="round" d="M18 18v-5.25m0 0a3 3 0 00-3-3m3 3a3 3 0 00-3-3m-3 3a3 3 0 00-3-3m3 3a3 3 0 00-3-3m-3 3a3 3 0 00-3-3m3 3a3 3 0 00-3-3m0 9.75V18m0-9.75a3 3 0 013-3m-3 3a3 3 0 00-3 3m3-3a3 3 0 013-3m-3 3a3 3 0 00-3 3m6.75 3.375c.621 1.278 1.694 2.34 2.873 3.118a48.455 48.455 0 01-5.746 0c1.179-.778 2.252-1.84 2.873-3.118z"></path></svg>);
-
