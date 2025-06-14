@@ -8,6 +8,9 @@ import {
   Participant,
   ConnectionState,
   DataPacket_Kind,
+  RemoteParticipant,
+  RemoteTrackPublication,
+  RemoteTrack,
 } from 'livekit-client';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -201,9 +204,9 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
         }
     };
     
+    // --- LiveKit Event Handling ---
     useEffect(() => {
         if (!room) return;
-        const updateParticipantsList = () => setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
         
         const showNotification = (message: string) => {
             setConnectionNotification(message);
@@ -212,17 +215,20 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
 
         const handleParticipantConnected = (participant: Participant) => {
             showNotification(`${participant.identity} has joined.`);
-            updateParticipantsList();
+            setParticipants(prev => [...prev, participant]);
         }
         const handleParticipantDisconnected = (participant: Participant) => {
             showNotification(`${participant.identity} has left.`);
-            updateParticipantsList();
+            setParticipants(prev => prev.filter(p => p.sid !== participant.sid));
         }
 
         const handleDataReceived = async (payload: Uint8Array, participant?: Participant) => {
+            console.log("Received data packet from:", participant?.identity);
             try {
                 const decoder = new TextDecoder();
                 const packet = JSON.parse(decoder.decode(payload)) as VoiceNotePacket;
+                console.log("Parsed packet:", packet);
+
                 const audioBuffer = base64ToArrayBuffer(packet.audioData);
                 const processedBlob = await applyVoiceEffect(audioBuffer, packet.effectId);
                 const audioUrl = URL.createObjectURL(processedBlob);
@@ -238,10 +244,12 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
                 console.error('Error processing received voice note:', error);
             }
         };
-        updateParticipantsList();
+
+        setParticipants([room.localParticipant, ...room.remoteParticipants.values()]);
         room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
         room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
         room.on(RoomEvent.DataReceived, handleDataReceived);
+
         return () => {
             room.off(RoomEvent.ParticipantConnected, handleParticipantConnected);
             room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
@@ -280,6 +288,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
     const handleSendNote = async () => {
         if (!lastRecording.blob || !room) return;
         setRecordingStatus('sending');
+        console.log("Preparing to send voice note...");
         try {
             const arrayBuffer = await lastRecording.blob.arrayBuffer();
             const base64Audio = arrayBufferToBase64(arrayBuffer);
@@ -289,7 +298,9 @@ export default function VoiceNotesPage({ params }: { params: { roomName:string }
             };
             const encoder = new TextEncoder();
             const data = encoder.encode(JSON.stringify(packet));
+            console.log("Publishing data packet...");
             await room.localParticipant.publishData(data, { reliable: true });
+            console.log("Data packet published successfully.");
         } catch (error) {
             console.error("Error sending voice note:", error);
             setConnectionError("Failed to send voice note.");
@@ -399,11 +410,10 @@ const InCall = ({ roomName, participants, voiceNotes, recordingStatus, onStartRe
             </header>
             <div className="flex-1 bg-[#111] rounded-2xl p-4 overflow-y-auto mb-6 border border-[#222]">
                 <AnimatePresence>
-                    {!hasPeers && (
+                    {!hasPeers && recordingStatus === 'idle' && (
                         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center h-full text-gray-500">
                             <UsersIcon className="w-16 h-16 mb-4" />
                             <p className="font-bold">Waiting for others to join...</p>
-                            <p className="text-sm">The room link has been copied to your clipboard.</p>
                         </motion.div>
                     )}
                     {hasPeers && voiceNotes.length === 0 && (
@@ -479,7 +489,7 @@ const ConnectionNotification = ({ message }: { message: string | null }) => {
                     animate={{ y: 0, opacity: 1 }}
                     exit={{ y: -100, opacity: 0 }}
                     transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                    className="absolute top-4 left-1/2 -translate-x-1/2 bg-blue-600 text-white px-4 py-2 rounded-lg shadow-lg"
+                    className="absolute top-4 left-1/2 -translate-x-1/2 bg-blue-600 text-white px-4 py-2 rounded-lg shadow-lg z-50"
                 >
                     {message}
                 </motion.div>
