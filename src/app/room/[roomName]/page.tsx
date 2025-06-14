@@ -1,13 +1,11 @@
 "use client";
 
-import React, { useEffect, useState, SVGProps, useCallback, useRef, useMemo } from 'react';
-import { useRouter } from 'next/navigation';
+import React, { useEffect, useState, SVGProps, useCallback, useRef } from 'react';
 import {
   Room,
   RoomEvent,
   Participant,
   ConnectionState,
-  DataPacket_Kind,
 } from 'livekit-client';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -167,11 +165,18 @@ class AudioProcessor {
     }
 
     static async getAudioDuration(audioBlob: Blob): Promise<number> {
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
             const audio = new Audio();
-            audio.onloadedmetadata = () => resolve(audio.duration);
-            audio.onerror = () => resolve(0);
-            audio.src = URL.createObjectURL(audioBlob);
+            const objectUrl = URL.createObjectURL(audioBlob);
+            audio.onloadedmetadata = () => {
+                resolve(audio.duration);
+                URL.revokeObjectURL(objectUrl);
+            };
+            audio.onerror = () => {
+                reject(new Error("Failed to load audio metadata."));
+                URL.revokeObjectURL(objectUrl);
+            };
+            audio.src = objectUrl;
         });
     }
 
@@ -317,13 +322,12 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
     const [recordingParticipants, setRecordingParticipants] = useState<Record<string, boolean>>({});
     const [lastRecording, setLastRecording] = useState<{ blob: Blob | null; url: string | null }>({ blob: null, url: null });
     const [selectedVoice, setSelectedVoice] = useState('budi');
-    const [isOnline, setIsOnline] = useState(navigator.onLine);
+    const [isOnline, setIsOnline] = useState(true);
     const [sendingProgress, setSendingProgress] = useState(0);
 
     const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
     const receivedChunksRef = useRef<Record<string, { chunks: (string | null)[]; endPacket: Packet & { type: 'voice-end' } | null; timeoutId?: NodeJS.Timeout }>>({});
     const sentChunksCacheRef = useRef<SentChunksCache>({});
-    const router = useRouter();
     const roomName = params.roomName;
 
     const { notification, showNotification } = useNotifications();
@@ -336,6 +340,10 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
             setIsOnline(false);
             showNotification("You're offline. Please check your connection.", 5000);
         };
+        // Initial state
+        if (typeof navigator !== 'undefined') {
+            setIsOnline(navigator.onLine);
+        }
         window.addEventListener('online', handleOnline);
         window.addEventListener('offline', handleOffline);
         return () => {
@@ -400,7 +408,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
         }
     }, [room, showNotification]);
 
-    const processCompleteNote = useCallback(async (noteId: string) => {
+    const processCompleteNote = useCallback(async (noteId: string, sender: { id: string, name: string }) => {
         const transferData = receivedChunksRef.current[noteId];
         if (!transferData || !transferData.endPacket) return;
 
@@ -419,7 +427,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
 
         const newNote: VoiceNote = {
             id: endPacket.noteId,
-            sender: { id: "unknown", name: "unknown" }, // Placeholder, will be set in handleDataReceived
+            sender: sender,
             audioUrl,
             timestamp: Date.now(),
             isPlaying: false,
@@ -466,8 +474,6 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
 
             try {
                 const packet = JSON.parse(new TextDecoder().decode(payload)) as Packet;
-
-                // Set sender info for later processing
                 const getSender = () => ({ id: participant.sid, name: participant.identity });
 
                 switch (packet.type) {
@@ -484,9 +490,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                         const transferData = receivedChunksRef.current[packet.noteId];
                         if (transferData.endPacket && !transferData.chunks.includes(null)) {
                             if (transferData.timeoutId) clearTimeout(transferData.timeoutId);
-                            processCompleteNote(packet.noteId).then(() => {
-                                setVoiceNotes(prev => prev.map(n => n.id === packet.noteId ? { ...n, sender: getSender() } : n));
-                            });
+                            await processCompleteNote(packet.noteId, getSender());
                         }
                         break;
                     }
@@ -507,9 +511,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                         
                         if (receivedCount === totalChunks) {
                              if (transferData.timeoutId) clearTimeout(transferData.timeoutId);
-                             processCompleteNote(noteId).then(() => {
-                                setVoiceNotes(prev => prev.map(n => n.id === noteId ? { ...n, sender: getSender() } : n));
-                            });
+                             await processCompleteNote(noteId, getSender());
                         } else {
                             const missingIndexes = transferData.chunks
                                 .map((c, i) => c === null ? i : -1)
@@ -518,7 +520,6 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                             console.log(`Requesting ${missingIndexes.length} missing chunks for ${noteId}`);
                             broadcastPacket({ type: 'request-chunks', noteId, missingIndexes });
                             
-                            // Set a timeout to fail the transfer if chunks don't arrive
                             transferData.timeoutId = setTimeout(() => {
                                 handleIncompleteTransfer(noteId);
                             }, CHUNK_RESEND_TIMEOUT);
@@ -530,7 +531,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                         const { noteId, missingIndexes } = packet;
                         const cached = sentChunksCacheRef.current[noteId];
                         if (cached) {
-                            console.log(`Resending ${missingIndexes.length} chunks for ${noteId}`);
+                            console.log(`Resending ${missingIndexes.length} chunks for ${noteId} to ${participant.identity}`);
                             for (const index of missingIndexes) {
                                 await broadcastPacket({
                                     type: 'chunk-resend',
@@ -538,7 +539,7 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                                     chunk: cached.chunks[index],
                                     index,
                                     total: cached.chunks.length,
-                                }, false); // Resend unreliable to not block main channel
+                                }, false);
                                 await new Promise(res => setTimeout(res, 20)); // Small delay
                             }
                         }
@@ -563,16 +564,27 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                 console.error('Error processing received data:', error);
             }
         };
-
+        
+        // FIX: This function is updated to be more resilient to new states in the livekit-client library.
         const handleConnectionStateChanged = (state: ConnectionState) => {
-            const statusMap: Record<ConnectionState, ConnectionStatus> = {
+            // This map translates LiveKit's connection state to our simpler app status.
+            const statusMap = {
                 [ConnectionState.Connected]: 'connected',
                 [ConnectionState.Connecting]: 'connecting',
+                [ConnectionState.Disconnected]: 'disconnected',
                 [ConnectionState.Reconnecting]: 'connecting',
-                [ConnectionState.Disconnected]: 'disconnected'
+                // Explicitly handle the state that was causing the build error.
+                ['signal-reconnecting']: 'connecting', 
             };
-            setConnectionStatus(statusMap[state]);
-            if(state === ConnectionState.Disconnected) showNotification('Disconnected from room');
+            
+            // The `state` variable from the enum is a string, so we can use it as a key.
+            // We provide a fallback to 'connecting' for any unknown future states.
+            const newStatus = statusMap[state as keyof typeof statusMap] || 'connecting';
+            setConnectionStatus(newStatus);
+        
+            if (state === ConnectionState.Disconnected) {
+                showNotification('Disconnected from room');
+            }
         };
 
         handleParticipantUpdate();
@@ -954,7 +966,7 @@ const RecordingControls = React.memo(({
         {recordingStatus === 'reviewing' && (
             <div className="flex items-center gap-4">
                 <button onClick={onDiscardNote} className="bg-gray-600 hover:bg-gray-500 p-4 rounded-full transition-colors" title="Discard recording"><XIcon className="w-6 h-6 text-white"/></button>
-                {lastRecordingUrl && <audio ref={reviewPlayerRef} src={lastRecordingUrl} />}
+                {lastRecordingUrl && <audio ref={reviewPlayerRef} src={lastRecordingUrl} preload="auto" />}
                 <button onClick={playReview} className="bg-blue-600 hover:bg-blue-500 p-5 rounded-full transition-colors" title="Preview recording"><PlayIcon className="w-8 h-8 text-white"/></button>
                 <button onClick={onSendNote} className="bg-green-600 hover:bg-green-500 p-4 rounded-full transition-colors" title="Send recording"><SendIcon className="w-6 h-6 text-white"/></button>
             </div>
@@ -964,7 +976,7 @@ const RecordingControls = React.memo(({
         )}
         {recordingStatus === 'sending' && (
             <div className="text-center w-48">
-                <div className="relative">
+                <div className="relative inline-flex">
                      <LoadingSpinner size="large" />
                      <div className="absolute top-0 left-0 w-full h-full flex items-center justify-center text-xs font-bold">{Math.round(sendingProgress)}%</div>
                 </div>
@@ -1056,3 +1068,4 @@ const TrashIcon = (props: SVGProps<SVGSVGElement>) => (<svg fill="currentColor" 
 const CheckIcon = (props: SVGProps<SVGSVGElement>) => (<svg fill="currentColor" viewBox="0 0 24 24" {...props}><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"></path></svg>);
 const CheckDoubleIcon = (props: SVGProps<SVGSVGElement>) => (<svg fill="currentColor" viewBox="0 0 24 24" {...props}><path d="M0.41 13.41L6 19l1.41-1.42L1.83 12 0.41 13.41zM22.41 5.41L12 15.83l-1.41-1.42L21 4 22.41 5.41zM18 7l-1.41-1.42L6 16.17 7.41 17.58 18 7z"></path></svg>);
 const WifiOffIcon = (props: SVGProps<SVGSVGElement>) => (<svg fill="currentColor" viewBox="0 0 24 24" {...props}><path d="M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.07 2.93 1 9zm8 8l3 3 3-3c-1.65-1.66-4.34-1.66-6 0zm-4-4l2 2c2.76-2.76 7.24-2.76 10 0l2-2C15.14 9.14 8.86 9.14 5 13z"></path></svg>);
+
