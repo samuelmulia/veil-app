@@ -1622,4 +1622,3 @@ const CopyIcon = (props: SVGProps<SVGSVGElement>) => (
             setLastRecording({ blob: audioBlob, url: audioUrl });
         }
         broadcast
-        
