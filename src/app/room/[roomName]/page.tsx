@@ -528,16 +528,18 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
 
         const handleConnectionStateChanged = (state: ConnectionState) => {
             switch (state) {
-                case ConnectionState.Connected: setConnectionStatus('connected'); break;
-                case ConnectionState.Connecting: setConnectionStatus('connecting'); break;
+                case ConnectionState.Connected:
+                    setConnectionStatus('connected');
+                    break;
+                case ConnectionState.Connecting:
+                    setConnectionStatus('connecting');
+                    break;
                 case ConnectionState.Disconnected:
                     setConnectionStatus('disconnected');
                     showNotification('Disconnected from room');
                     break;
-                case ConnectionState.Failed:
-                    setConnectionStatus('failed');
-                    showNotification('Connection failed');
-                    break;
+                // NOTE: The `Failed` state does not exist on the ConnectionState enum.
+                // Initial connection failures are handled by the try/catch in `handleEnterRoom`.
             }
         };
 
