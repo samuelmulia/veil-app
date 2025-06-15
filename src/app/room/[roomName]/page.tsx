@@ -12,7 +12,7 @@ import {
 import { AnimatePresence, motion } from 'framer-motion';
 
 // --- Constants ---
-const CHUNK_SIZE = 60 * 1024; // 60 KB
+const CHUNK_SIZE = 30 * 1024; // 30 KB - smaller chunks for better reliability
 const MAX_RECORDING_TIME = 60 * 1000; // 60 seconds
 const AUDIO_CONSTRAINTS = {
   audio: {
@@ -38,6 +38,13 @@ type NoteStatus = 'sent' | 'delivered' | 'played' | 'failed';
 type RecordingStatus = 'idle' | 'recording' | 'reviewing' | 'sending' | 'processing';
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'failed';
 
+interface SendProgress {
+    noteId: string;
+    sent: number;
+    total: number;
+    percentage: number;
+}
+
 interface VoiceNote {
     id: string;
     sender: { id: string; name: string };
@@ -56,38 +63,16 @@ interface AudioChunk {
     total?: number;
 }
 
-type Packet =
+type Packet = 
     | { type: 'voice-chunk'; noteId: string; chunk: string; index: number; total: number }
     | { type: 'voice-end'; noteId: string; totalChunks: number; effectId: string; duration: number }
     | { type: 'status'; status: 'recording' | 'idle' }
     | { type: 'delete-note'; noteId: string }
     | { type: 'status-update'; noteId: string; status: NoteStatus }
-    | { type: 'typing-indicator'; isTyping: boolean };
-
-
-// --- Room Utilities ---
-/**
- * Generates a random 8-character room code with 4 letters and 4 numbers.
- * This can be used on a separate "Create Room" page that then redirects
- * the user to a URL like `/voicenotes/[generated-code]`.
- */
-const generateRoomCode = () => {
-  const letters = 'abcdefghijklmnopqrstuvwxyz';
-  const numbers = '0123456789';
-  let code = [];
-
-  for (let i = 0; i < 4; i++) {
-    code.push(letters.charAt(Math.floor(Math.random() * letters.length)));
-  }
-
-  for (let i = 0; i < 4; i++) {
-    code.push(numbers.charAt(Math.floor(Math.random() * numbers.length)));
-  }
-
-  // Shuffle the array to mix letters and numbers, then join to a string
-  return code.sort(() => 0.5 - Math.random()).join('');
-};
-
+    | { type: 'typing-indicator'; isTyping: boolean }
+    | { type: 'request-chunks'; noteId: string; missingIndices: number[] }
+    | { type: 'chunk-resend'; noteId: string; chunk: string; index: number }
+    | { type: 'chunk-ack'; noteId: string; index: number; from: string };
 
 // --- Enhanced Audio Utilities ---
 class AudioProcessor {
@@ -104,7 +89,13 @@ class AudioProcessor {
         try {
             const audioContext = this.getAudioContext();
             const arrayBuffer = await audioBlob.arrayBuffer();
-            const sourceAudioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            const sourceAudioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0)); // Create a copy
+            
+            // Validate audio buffer
+            if (!sourceAudioBuffer || sourceAudioBuffer.length === 0) {
+                console.error('Invalid audio buffer');
+                return audioBlob;
+            }
 
             const offlineContext = new OfflineAudioContext(
                 sourceAudioBuffer.numberOfChannels,
@@ -114,7 +105,7 @@ class AudioProcessor {
 
             const source = offlineContext.createBufferSource();
             source.buffer = sourceAudioBuffer;
-
+            
             // Enhanced voice effects with better quality
             let pitchRate = 1.0;
             switch (effectId) {
@@ -127,10 +118,27 @@ class AudioProcessor {
             }
 
             source.playbackRate.value = pitchRate;
-            source.connect(offlineContext.destination);
+            
+            // Add a compressor to prevent clipping
+            const compressor = offlineContext.createDynamicsCompressor();
+            compressor.threshold.value = -24;
+            compressor.knee.value = 30;
+            compressor.ratio.value = 12;
+            compressor.attack.value = 0.003;
+            compressor.release.value = 0.25;
+            
+            source.connect(compressor);
+            compressor.connect(offlineContext.destination);
             source.start(0);
-
+            
             const renderedBuffer = await offlineContext.startRendering();
+            
+            // Validate rendered buffer
+            if (!renderedBuffer || renderedBuffer.length === 0) {
+                console.error('Rendering failed');
+                return audioBlob;
+            }
+            
             const wavBuffer = this.bufferToWav(renderedBuffer);
             return new Blob([wavBuffer], { type: 'audio/wav' });
         } catch (error) {
@@ -160,7 +168,7 @@ class AudioProcessor {
         for (i = 0; i < abuffer.numberOfChannels; i++) {
             channels.push(abuffer.getChannelData(i));
         }
-
+        
         while (pos < length) {
             for (i = 0; i < numOfChan; i++) {
                 sample = Math.max(-1, Math.min(1, channels[i][offset]));
@@ -186,7 +194,7 @@ class AudioProcessor {
         const rawData = audioBuffer.getChannelData(0);
         const blockSize = Math.floor(rawData.length / samples);
         const filteredData = [];
-
+        
         for (let i = 0; i < samples; i++) {
             let blockStart = blockSize * i;
             let sum = 0;
@@ -195,7 +203,7 @@ class AudioProcessor {
             }
             filteredData.push(sum / blockSize);
         }
-
+        
         const multiplier = Math.pow(Math.max(...filteredData), -1);
         return filteredData.map(n => n * multiplier);
     }
@@ -207,7 +215,7 @@ const EncodingUtils = {
         let binary = '';
         const bytes = new Uint8Array(buffer);
         const chunkSize = 0x8000; // 32KB chunks to avoid call stack size exceeded
-
+        
         for (let i = 0; i < bytes.length; i += chunkSize) {
             const chunk = bytes.subarray(i, i + chunkSize);
             binary += String.fromCharCode.apply(null, Array.from(chunk));
@@ -229,7 +237,7 @@ const EncodingUtils = {
 // --- Custom Hooks ---
 const useNotifications = () => {
     const [notification, setNotification] = useState<string | null>(null);
-
+    
     const showNotification = useCallback((message: string, duration = 3000) => {
         setNotification(message);
         setTimeout(() => setNotification(null), duration);
@@ -250,43 +258,43 @@ const useAudioRecorder = () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
             streamRef.current = stream;
-
-            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-                ? 'audio/webm;codecs=opus'
+            
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+                ? 'audio/webm;codecs=opus' 
                 : 'audio/webm';
-
+                
             mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
             audioChunksRef.current = [];
-
+            
             mediaRecorderRef.current.ondataavailable = (event) => {
                 if (event.data.size > 0) {
                     audioChunksRef.current.push(event.data);
                 }
             };
-
+            
             mediaRecorderRef.current.onstop = () => {
                 if (streamRef.current) {
                     streamRef.current.getTracks().forEach(track => track.stop());
                     streamRef.current = null;
                 }
             };
-
+            
             // Start recording
             mediaRecorderRef.current.start();
             setRecordingStatus('recording');
             setRecordingTime(0);
-
+            
             // Start recording timer with more precise timing
             const startTime = Date.now();
             recordingTimerRef.current = setInterval(() => {
                 const elapsed = Math.floor((Date.now() - startTime) / 1000);
                 setRecordingTime(elapsed);
-
+                
                 if (elapsed >= MAX_RECORDING_TIME / 1000) {
                     stopRecording();
                 }
             }, 100); // Update every 100ms for smoother timer
-
+            
             return true;
         } catch (error) {
             console.error('Failed to start recording:', error);
@@ -302,11 +310,11 @@ const useAudioRecorder = () => {
                 clearInterval(recordingTimerRef.current);
                 recordingTimerRef.current = null;
             }
-
+            
             if (mediaRecorderRef.current?.state === 'recording') {
                 mediaRecorderRef.current.onstop = () => {
-                    const audioBlob = new Blob(audioChunksRef.current, {
-                        type: mediaRecorderRef.current?.mimeType || 'audio/webm'
+                    const audioBlob = new Blob(audioChunksRef.current, { 
+                        type: mediaRecorderRef.current?.mimeType || 'audio/webm' 
                     });
                     setRecordingStatus('reviewing');
                     resolve(audioBlob);
@@ -357,9 +365,15 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
     const [lastRecording, setLastRecording] = useState<{ blob: Blob | null; url: string | null }>({ blob: null, url: null });
     const [selectedVoice, setSelectedVoice] = useState('budi');
     const [isOnline, setIsOnline] = useState(navigator.onLine);
+    const [sendProgress, setSendProgress] = useState<SendProgress | null>(null);
+    const [connectionQuality, setConnectionQuality] = useState<'good' | 'fair' | 'poor'>('good');
+    const [copyNotification, setCopyNotification] = useState(false);
 
     const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
     const receivedChunksRef = useRef<Record<string, string[]>>({});
+    const pendingNotesRef = useRef<Record<string, { totalChunks: number; effectId: string; duration: number; participant: Participant }>>({});
+    const sentChunksRef = useRef<Record<string, string[]>>({});
+    const chunkAcksRef = useRef<Record<string, Set<number>>>({});
     const router = useRouter();
     const roomName = params.roomName;
 
@@ -377,10 +391,10 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
     useEffect(() => {
         const handleOnline = () => setIsOnline(true);
         const handleOffline = () => setIsOnline(false);
-
+        
         window.addEventListener('online', handleOnline);
         window.addEventListener('offline', handleOffline);
-
+        
         return () => {
             window.removeEventListener('online', handleOnline);
             window.removeEventListener('offline', handleOffline);
@@ -395,28 +409,28 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
 
         setConnectionStatus('connecting');
         const identity = `user-${Math.random().toString(36).substring(7).slice(0, 5)}`;
-
+        
         try {
             // Test microphone access first
             await navigator.mediaDevices.getUserMedia({ audio: true });
-
+            
             const resp = await fetch(`/api/token?roomName=${encodeURIComponent(roomName)}&identity=${encodeURIComponent(identity)}`, {
                 method: 'GET',
                 headers: { 'Content-Type': 'application/json' }
             });
-
+            
             if (!resp.ok) {
                 throw new Error(`Failed to get token: ${resp.status} ${resp.statusText}`);
             }
-
+            
             const { token } = await resp.json();
             const newRoom = new Room();
             const wsUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
-
+            
             if (!wsUrl) {
                 throw new Error("LiveKit URL is not configured.");
             }
-
+            
             await newRoom.connect(wsUrl, token);
             setRoom(newRoom);
             setConnectionStatus('connected');
@@ -428,13 +442,13 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
             showNotification(`Connection failed: ${error.message}`, 5000);
         }
     };
-
+    
     const broadcastPacket = useCallback(async (packet: Packet) => {
         if (!room || room.state !== ConnectionState.Connected) {
             console.warn('Cannot broadcast: room not connected');
             return false;
         }
-
+        
         try {
             const data = new TextEncoder().encode(JSON.stringify(packet));
             await room.localParticipant.publishData(data, { reliable: true });
@@ -444,150 +458,41 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
             return false;
         }
     }, [room]);
-
-    useEffect(() => {
-        if (!room) return;
-
-        const handleParticipantUpdate = () => {
-            setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
-        };
-
-        const handleParticipantConnected = (participant: Participant) => {
-            showNotification(`${participant.identity} joined`);
-            handleParticipantUpdate();
-        };
-
-        const handleParticipantDisconnected = (participant: Participant) => {
-            showNotification(`${participant.identity} left`);
-            handleParticipantUpdate();
-            setRecordingParticipants(prev => {
-                const newState = { ...prev };
-                delete newState[participant.identity];
-                return newState;
-            });
-        };
-
-        const handleDataReceived = async (payload: Uint8Array, participant?: Participant) => {
-            if (!participant) return;
-
-            try {
-                const packet = JSON.parse(new TextDecoder().decode(payload)) as Packet;
-
-                switch (packet.type) {
-                    case 'voice-chunk':
-                        if (!receivedChunksRef.current[packet.noteId]) {
-                            receivedChunksRef.current[packet.noteId] = new Array(packet.total).fill(null);
-                        }
-                        receivedChunksRef.current[packet.noteId][packet.index] = packet.chunk;
-
-                        // Debug: Log chunk reception
-                        const received = receivedChunksRef.current[packet.noteId].filter(c => c !== null).length;
-                        console.log(`Chunk ${packet.index + 1}/${packet.total} received for ${packet.noteId} (${received}/${packet.total})`);
-                        break;
-
-                        case 'voice-end':
-                        const chunks = receivedChunksRef.current[packet.noteId];
-                        if (chunks && chunks.length === packet.totalChunks) {
-                            const validChunks = chunks.filter(c => c !== null && c !== undefined);
-                            console.log(`Voice-end received: Expected ${packet.totalChunks}, got ${validChunks.length} valid chunks`);
-
-                            if (validChunks.length === packet.totalChunks && chunks.every(c => c !== null && c !== undefined)) {
-                                const fullBase64 = chunks.join('');
-                                const audioBuffer = EncodingUtils.base64ToArrayBuffer(fullBase64);
-                                const audioBlob = new Blob([audioBuffer], { type: 'audio/wav' });
-                                const audioUrl = URL.createObjectURL(audioBlob);
-
-                                const newNote: VoiceNote = {
-                                    id: packet.noteId,
-                                    sender: { id: participant.sid, name: participant.identity },
-                                    audioUrl,
-                                    timestamp: Date.now(),
-                                    isPlaying: false,
-                                    status: 'delivered',
-                                    duration: packet.duration
-                                };
-
-                                setVoiceNotes(prev => [newNote, ...prev]);
-                                delete receivedChunksRef.current[packet.noteId];
-                                broadcastPacket({ type: 'status-update', noteId: newNote.id, status: 'delivered' });
-                            }
-                        }
-                        break;
-
-                    case 'status':
-                        setRecordingParticipants(prev => ({
-                            ...prev,
-                            [participant.identity]: packet.status === 'recording'
-                        }));
-                        break;
-
-                    case 'delete-note':
-                        setVoiceNotes(prev => prev.filter(note => note.id !== packet.noteId));
-                        break;
-
-                    case 'status-update':
-                        setVoiceNotes(prev => prev.map(note =>
-                            note.id === packet.noteId ? { ...note, status: packet.status } : note
-                        ));
-                        break;
-                }
-            } catch (error) {
-                console.error('Error processing received data:', error);
-            }
-        };
-
-        const handleConnectionStateChanged = (state: ConnectionState) => {
-            switch (state) {
-                case ConnectionState.Connected:
-                    setConnectionStatus('connected');
-                    break;
-                case ConnectionState.Connecting:
-                    setConnectionStatus('connecting');
-                    break;
-                case ConnectionState.Disconnected:
-                    setConnectionStatus('disconnected');
-                    showNotification('Disconnected from room');
-                    break;
-            }
-        };
-
-        handleParticipantUpdate();
-        room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
-        room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
-        room.on(RoomEvent.DataReceived, handleDataReceived);
-        room.on(RoomEvent.ConnectionStateChanged, handleConnectionStateChanged);
-
-        return () => {
-            room.off(RoomEvent.ParticipantConnected, handleParticipantConnected);
-            room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
-            room.off(RoomEvent.DataReceived, handleDataReceived);
-            room.off(RoomEvent.ConnectionStateChanged, handleConnectionStateChanged);
-        };
-    }, [room, broadcastPacket, showNotification]);
-
-    const handleStartRecording = useCallback(async () => {
-        const success = await startRecording();
-        if (success) {
-            broadcastPacket({ type: 'status', status: 'recording' });
-        } else {
-            showNotification('Failed to start recording. Please check microphone permissions.');
+    
+    const processCompleteAudio = useCallback((noteId: string, participant: Participant, duration: number) => {
+        const chunks = receivedChunksRef.current[noteId];
+        if (!chunks || chunks.some(c => c === null)) {
+            console.error(`Cannot process incomplete audio for ${noteId}`);
+            return;
         }
-    }, [startRecording, broadcastPacket, showNotification]);
-
-    const handleStopRecording = useCallback(async () => {
-        const audioBlob = await stopRecording();
-        if (audioBlob) {
+        
+        try {
+            const fullBase64 = chunks.join('');
+            const audioBuffer = EncodingUtils.base64ToArrayBuffer(fullBase64);
+            const audioBlob = new Blob([audioBuffer], { type: 'audio/wav' });
             const audioUrl = URL.createObjectURL(audioBlob);
-            setLastRecording({ blob: audioBlob, url: audioUrl });
-        }
-        broadcastPacket({ type: 'status', status: 'idle' });
+            
+            const newNote: VoiceNote = {
+                id: noteId,
+                sender: { id: participant.sid, name: participant.identity },
+                audioUrl,
+                timestamp: Date.now(),
+                isPlaying: false,
+                status: 'delivered',
+                duration
+            };
+            
+            setVoiceNotes(prev => [newNote, ...prev]);
+            delete receivedChunksRef.current[noteId];
+            delete pendingNotesRef.current[noteId];
+            broadcastPacket({ type: 'status', status: 'idle' });
     }, [stopRecording, broadcastPacket]);
-
+    
     const handleSendNote = useCallback(async () => {
         if (!lastRecording.blob || !room) return;
-
+        
         setRecordingStatus('processing');
-
+        
         try {
             const processedBlob = await AudioProcessor.applyVoiceEffect(lastRecording.blob, selectedVoice);
             const duration = await AudioProcessor.getAudioDuration(processedBlob);
@@ -600,48 +505,96 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
 
             console.log(`Sending voice note: ${totalChunks} chunks, ${base64Audio.length} bytes`);
 
+            // Initialize progress tracking
+            setSendProgress({
+                noteId,
+                sent: 0,
+                total: totalChunks,
+                percentage: 0
+            });
+            
+            // Function to send a chunk with retry
+            const sendChunkWithRetry = async (chunk: string, index: number, retries = 3): Promise<boolean> => {
+                for (let attempt = 0; attempt < retries; attempt++) {
+                    const success = await broadcastPacket({
+                        type: 'voice-chunk',
+                        noteId,
+                        chunk,
+                        index,
+                        total: totalChunks
+                    });
+                    
+                    if (success) return true;
+                    
+                    // Wait before retry with exponential backoff
+                    if (attempt < retries - 1) {
+                        await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 100));
+                    }
+                }
+                return false;
+            };
+
             // Send chunks with better reliability
+            sentChunksRef.current[noteId] = new Array(totalChunks);
+            chunkAcksRef.current[noteId] = new Set();
+            let sentCount = 0;
+            
             const chunkPromises = [];
             for (let i = 0; i < totalChunks; i++) {
                 const chunk = base64Audio.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-                const promise = broadcastPacket({
-                    type: 'voice-chunk',
-                    noteId,
-                    chunk,
-                    index: i,
-                    total: totalChunks
+                sentChunksRef.current[noteId][i] = chunk; // Save chunk for potential resend
+                
+                const promise = sendChunkWithRetry(chunk, i).then(success => {
+                    if (success) {
+                        sentCount++;
+                        setSendProgress({
+                            noteId,
+                            sent: sentCount,
+                            total: totalChunks,
+                            percentage: Math.round((sentCount / totalChunks) * 100)
+                        });
+                    }
+                    return success;
                 });
+                
                 chunkPromises.push(promise);
-
+                
                 // Add small delay between chunks to prevent overwhelming
                 if (i < totalChunks - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 50));
+                    await new Promise(resolve => setTimeout(resolve, 20));
                 }
             }
-
+            
             // Wait for all chunks to be sent
             const results = await Promise.all(chunkPromises);
-            const failedChunks = results.filter(result => !result);
-
+            const failedChunks = results.map((success, index) => success ? -1 : index).filter(i => i !== -1);
+            
             if (failedChunks.length > 0) {
+                console.error(`Failed to send chunks: ${failedChunks.join(', ')}`);
                 throw new Error(`Failed to send ${failedChunks.length} chunks`);
             }
-
-            // Send end packet with verification
-            const endSuccess = await broadcastPacket({
-                type: 'voice-end',
-                noteId,
-                totalChunks,
-                effectId: selectedVoice,
-                duration
-            });
-
+            
+            // Send end packet with verification and retry
+            let endSuccess = false;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                endSuccess = await broadcastPacket({
+                    type: 'voice-end',
+                    noteId,
+                    totalChunks,
+                    effectId: selectedVoice,
+                    duration
+                });
+                
+                if (endSuccess) break;
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+            
             if (!endSuccess) {
                 throw new Error('Failed to send voice-end packet');
             }
-
+            
             console.log(`Voice note sent successfully: ${noteId}`);
-
+            
             const newNote: VoiceNote = {
                 id: noteId,
                 sender: { id: room.localParticipant.sid, name: 'You' },
@@ -651,22 +604,28 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                 status: 'sent',
                 duration
             };
-
+            
             setVoiceNotes(prev => [newNote, ...prev]);
             showNotification('Voice note sent!');
+            
+            // Clean up saved chunks after a delay
+            setTimeout(() => {
+                delete sentChunksRef.current[noteId];
+            }, 30000); // Keep for 30 seconds in case resend is needed
 
         } catch (error) {
             console.error("Error sending voice note:", error);
             showNotification('Failed to send voice note. Please try again.');
-
+            
             // Mark any pending notes as failed
-            setVoiceNotes(prev => prev.map(note =>
-                note.sender.name === 'You' && note.status === 'sent'
+            setVoiceNotes(prev => prev.map(note => 
+                note.sender.name === 'You' && note.status === 'sent' 
                     ? { ...note, status: 'failed' }
                     : note
             ));
         } finally {
             setRecordingStatus('idle');
+            setSendProgress(null);
             if (lastRecording.url) {
                 URL.revokeObjectURL(lastRecording.url);
             }
@@ -694,39 +653,39 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                 return; // Just pause, don't start again
             }
         }
-
+        
         const newAudio = new Audio(noteToPlay.audioUrl);
         audioPlayerRef.current = newAudio;
         audioPlayerRef.current.dataset.noteId = noteId;
 
         newAudio.onplay = () => {
-            setVoiceNotes(prev => prev.map(n =>
+            setVoiceNotes(prev => prev.map(n => 
                 n.id === noteId ? { ...n, isPlaying: true } : { ...n, isPlaying: false }
             ));
-
+            
             // Mark as played if it's from another user
             if (noteToPlay.sender.name !== 'You' && noteToPlay.status !== 'played') {
                 broadcastPacket({ type: 'status-update', noteId, status: 'played' });
             }
         };
-
+        
         newAudio.onpause = newAudio.onended = () => {
-            setVoiceNotes(prev => prev.map(n =>
+            setVoiceNotes(prev => prev.map(n => 
                 n.id === noteId ? { ...n, isPlaying: false } : n
             ));
         };
-
+        
         newAudio.onerror = () => {
             console.error('Error playing audio');
             showNotification('Error playing voice note');
         };
-
+        
         newAudio.play().catch(e => {
             console.error("Error playing audio:", e);
             showNotification('Error playing voice note');
         });
     }, [voiceNotes, broadcastPacket, showNotification]);
-
+    
     const handleDeleteNote = useCallback((noteId: string) => {
         const noteToDelete = voiceNotes.find(n => n.id === noteId);
         if (noteToDelete?.audioUrl) {
@@ -751,6 +710,11 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
             if (lastRecording.url) {
                 URL.revokeObjectURL(lastRecording.url);
             }
+            // Clear all refs
+            receivedChunksRef.current = {};
+            pendingNotesRef.current = {};
+            sentChunksRef.current = {};
+            chunkAcksRef.current = {};
         };
     }, []);
 
@@ -764,14 +728,15 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                 </div>
             )}
             {isInLobby ? (
-                <Lobby
-                    onEnterRoom={handleEnterRoom}
+                <Lobby 
+                    onEnterRoom={handleEnterRoom} 
                     connectionStatus={connectionStatus}
                     roomName={roomName}
                     selectedVoice={selectedVoice}
                     setSelectedVoice={setSelectedVoice}
                     isOnline={isOnline}
-                    showNotification={showNotification}
+                    copyNotification={copyNotification}
+                    setCopyNotification={setCopyNotification}
                 />
             ) : (
                 <InCall
@@ -790,6 +755,11 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
                     localParticipant={room?.localParticipant}
                     recordingParticipants={recordingParticipants}
                     connectionStatus={connectionStatus}
+                    sendProgress={sendProgress}
+                    copyNotification={copyNotification}
+                    setCopyNotification={setCopyNotification}
+                    copyNotification={copyNotification}
+                    setCopyNotification={setCopyNotification}
                 />
             )}
         </div>
@@ -797,35 +767,31 @@ export default function VoiceNotesPage({ params }: { params: { roomName: string 
 }
 
 // --- Enhanced UI Components ---
-
-interface LobbyProps {
-    onEnterRoom: () => void;
-    connectionStatus: ConnectionStatus;
-    roomName: string;
-    selectedVoice: string;
-    setSelectedVoice: (voice: string) => void;
-    isOnline: boolean;
-    showNotification: (message: string, duration?: number) => void;
-}
-
-const Lobby = React.memo(({
-    onEnterRoom,
-    connectionStatus,
-    roomName,
-    selectedVoice,
+const Lobby = React.memo(({ 
+    onEnterRoom, 
+    connectionStatus, 
+    roomName, 
+    selectedVoice, 
     setSelectedVoice,
     isOnline,
-    showNotification
-}: LobbyProps) => {
-
+    copyNotification,
+    setCopyNotification 
+}: any) => {
     const handleShare = async () => {
-        if (!roomName) return;
         try {
             await navigator.clipboard.writeText(roomName);
-            showNotification('Room code copied to clipboard!');
-        } catch (err) {
-            console.error('Failed to copy room code:', err);
-            showNotification('Could not copy room code.');
+            setCopyNotification(true);
+            setTimeout(() => setCopyNotification(false), 2000);
+        } catch (error) {
+            // Fallback for older browsers
+            const textArea = document.createElement('textarea');
+            textArea.value = roomName;
+            document.body.appendChild(textArea);
+            textArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textArea);
+            setCopyNotification(true);
+            setTimeout(() => setCopyNotification(false), 2000);
         }
     };
 
@@ -835,27 +801,37 @@ const Lobby = React.memo(({
                 <div className="bg-[#111] p-8 rounded-2xl flex flex-col border border-[#222]">
                     <div className="text-center mb-6">
                         <h2 className="text-2xl font-bold mb-2">Voice Notes Room</h2>
-                        <div className="flex justify-center items-center gap-2 mb-4">
-                            <p className="text-gray-400">Room: <span className="font-bold text-white">{roomName}</span></p>
-                            <button
-                                onClick={handleShare}
-                                className="p-2 rounded-full hover:bg-gray-700 transition-colors"
-                                title="Copy room code"
-                            >
-                                <ShareIcon className="w-5 h-5"/>
-                            </button>
+                        <div className="flex justify-center items-center gap-2 mb-2">
+                            <p className="text-gray-400">Room Code:</p>
+                            <div className="flex items-center gap-2 bg-[#222] px-3 py-1 rounded-lg">
+                                <span className="font-mono font-bold text-white text-lg">{roomName}</span>
+                                <button 
+                                    onClick={handleShare} 
+                                    className="p-1.5 rounded hover:bg-gray-700 transition-colors relative"
+                                    title="Copy room code"
+                                >
+                                    {copyNotification ? (
+                                        <CheckIcon className="w-5 h-5 text-green-400"/>
+                                    ) : (
+                                        <CopyIcon className="w-5 h-5 text-gray-400"/>
+                                    )}
+                                </button>
+                            </div>
                         </div>
+                        <p className="text-xs text-gray-500 mb-4">
+                            Share this code with others to invite them to your voice chat room
+                        </p>
                         <ConnectionStatusIndicator status={connectionStatus} />
                     </div>
-
+                    
                     <div className="mb-8 flex-grow">
                         <h3 className="text-lg font-semibold mb-3 text-center">Choose Your Anonymous Voice</h3>
                         <VoiceOptions selectedVoice={selectedVoice} setSelectedVoice={setSelectedVoice} />
                     </div>
-
-                    <button
-                        onClick={onEnterRoom}
-                        disabled={connectionStatus === 'connecting' || !isOnline}
+                    
+                    <button 
+                        onClick={onEnterRoom} 
+                        disabled={connectionStatus === 'connecting' || !isOnline} 
                         className="btn-primary w-full font-bold py-4 rounded-xl text-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                     >
                         {connectionStatus === 'connecting' ? (
@@ -875,22 +851,25 @@ const Lobby = React.memo(({
     );
 });
 
-const InCall = React.memo(({
-    roomName,
-    participants,
-    voiceNotes,
-    recordingStatus,
+const InCall = React.memo(({ 
+    roomName, 
+    participants, 
+    voiceNotes, 
+    recordingStatus, 
     recordingTime,
-    onStartRecording,
-    onStopRecording,
-    onSendNote,
-    onDiscardNote,
-    lastRecordingUrl,
-    onPlayPause,
-    onDeleteNote,
-    localParticipant,
+    onStartRecording, 
+    onStopRecording, 
+    onSendNote, 
+    onDiscardNote, 
+    lastRecordingUrl, 
+    onPlayPause, 
+    onDeleteNote, 
+    localParticipant, 
     recordingParticipants,
-    connectionStatus
+    connectionStatus,
+    sendProgress,
+    copyNotification,
+    setCopyNotification 
 }: any) => {
     const reviewPlayerRef = useRef<HTMLAudioElement>(null);
     const hasPeers = participants.length > 1;
@@ -914,6 +893,24 @@ const InCall = React.memo(({
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     };
 
+    const handleCopyRoomCode = async () => {
+        try {
+            await navigator.clipboard.writeText(roomName);
+            setCopyNotification(true);
+            setTimeout(() => setCopyNotification(false), 2000);
+        } catch (error) {
+            // Fallback for older browsers
+            const textArea = document.createElement('textarea');
+            textArea.value = roomName;
+            document.body.appendChild(textArea);
+            textArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textArea);
+            setCopyNotification(true);
+            setTimeout(() => setCopyNotification(false), 2000);
+        }
+    };
+
     return (
         <div className="flex-1 flex flex-col p-4 md:p-6 max-w-4xl mx-auto w-full">
             <header className="mb-6">
@@ -923,8 +920,24 @@ const InCall = React.memo(({
                 </div>
                 <p className="text-gray-400">
                     You are <span className="font-mono bg-[#222] px-2 py-1 rounded">{localParticipant?.identity}</span>
-                    {' '}in room <span className="font-bold text-white">{roomName}</span>
                 </p>
+                <div className="flex items-center gap-2 mt-2">
+                    <p className="text-gray-400">Room Code:</p>
+                    <div className="flex items-center gap-2 bg-[#222] px-3 py-1 rounded-lg">
+                        <span className="font-mono font-bold text-white">{roomName}</span>
+                        <button 
+                            onClick={handleCopyRoomCode} 
+                            className="p-1 rounded hover:bg-gray-700 transition-colors"
+                            title="Copy room code"
+                        >
+                            {copyNotification ? (
+                                <CheckIcon className="w-4 h-4 text-green-400"/>
+                            ) : (
+                                <CopyIcon className="w-4 h-4 text-gray-400"/>
+                            )}
+                        </button>
+                    </div>
+                </div>
                 <div className="text-gray-400 text-sm mt-2">
                     <span className="font-bold">Participants ({participants.length}):</span>
                     <div className="flex flex-wrap gap-2 mt-1">
@@ -939,29 +952,29 @@ const InCall = React.memo(({
                     </div>
                 </div>
             </header>
-
+            
             <div className="flex-1 bg-[#111] rounded-2xl p-4 overflow-y-auto mb-6 border border-[#222] min-h-0">
                 <AnimatePresence>
                     {!hasPeers && recordingStatus === 'idle' && (
-                        <motion.div
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
+                        <motion.div 
+                            initial={{ opacity: 0 }} 
+                            animate={{ opacity: 1 }} 
                             className="flex flex-col items-center justify-center h-full text-gray-500"
                         >
                             <UsersIcon className="w-16 h-16 mb-4" />
                             <p className="font-bold text-lg">Waiting for others to join...</p>
-                            <p className="text-sm mt-2">Share the room code to invite people</p>
+                            <p className="text-sm mt-2">Share the room link to invite people</p>
                         </motion.div>
                     )}
                     {hasPeers && voiceNotes.length === 0 && (
-                        <motion.div
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
+                        <motion.div 
+                            initial={{ opacity: 0 }} 
+                            animate={{ opacity: 1 }} 
                             className="flex flex-col items-center justify-center h-full text-gray-500"
                         >
                             <MessageSquareIcon className="w-16 h-16 mb-4" />
                             <p className="font-bold text-lg">No voice notes yet</p>
-                            <p className="text-sm mt-2">Tap the mic button to record</p>
+                            <p className="text-sm mt-2">Press and hold the mic button to record</p>
                         </motion.div>
                     )}
                     {voiceNotes.map((note: VoiceNote) => (
@@ -975,7 +988,7 @@ const InCall = React.memo(({
                     ))}
                 </AnimatePresence>
             </div>
-
+            
             <RecordingControls
                 recordingStatus={recordingStatus}
                 recordingTime={recordingTime}
@@ -987,13 +1000,14 @@ const InCall = React.memo(({
                 playReview={playReview}
                 formatTime={formatTime}
                 reviewPlayerRef={reviewPlayerRef}
+                sendProgress={sendProgress}
             />
         </div>
     );
 });
 
 const VoiceNoteItem = React.memo(({ note, onPlayPause, onDelete, formatDuration }: any) => (
-    <motion.div
+    <motion.div 
         key={note.id}
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -1001,11 +1015,11 @@ const VoiceNoteItem = React.memo(({ note, onPlayPause, onDelete, formatDuration 
         layout
         className="flex items-center space-x-4 p-4 mb-3 bg-[#222] rounded-lg hover:bg-[#333] transition-colors"
     >
-        <button
-            onClick={() => onPlayPause(note.id)}
+        <button 
+            onClick={() => onPlayPause(note.id)} 
             className={`p-3 rounded-full transition-all ${
-                note.isPlaying
-                    ? 'bg-yellow-500 hover:bg-yellow-400'
+                note.isPlaying 
+                    ? 'bg-yellow-500 hover:bg-yellow-400' 
                     : 'bg-blue-600 hover:bg-blue-500'
             }`}
         >
@@ -1015,7 +1029,7 @@ const VoiceNoteItem = React.memo(({ note, onPlayPause, onDelete, formatDuration 
                 <PlayIcon className="w-5 h-5 text-white" />
             )}
         </button>
-
+        
         <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">
                 <p className="font-bold text-white truncate">{note.sender.name}</p>
@@ -1030,10 +1044,10 @@ const VoiceNoteItem = React.memo(({ note, onPlayPause, onDelete, formatDuration 
                 {note.sender.name === 'You' && <ReadReceipt status={note.status} />}
             </div>
         </div>
-
+        
         {note.sender.name === 'You' && (
-            <button
-                onClick={() => onDelete(note.id)}
+            <button 
+                onClick={() => onDelete(note.id)} 
                 className="p-2 text-gray-500 hover:text-red-500 transition-colors"
                 title="Delete note"
             >
@@ -1053,13 +1067,14 @@ const RecordingControls = React.memo(({
     lastRecordingUrl,
     playReview,
     formatTime,
-    reviewPlayerRef
+    reviewPlayerRef,
+    sendProgress
 }: any) => (
     <footer className="flex justify-center items-center p-4 h-32">
         {recordingStatus === 'idle' && (
             <div className="text-center">
-                <button
-                    onClick={onStartRecording}
+                <button 
+                    onClick={onStartRecording} 
                     className="record-btn idle w-20 h-20 rounded-full flex items-center justify-center transition-all duration-200 ease-in-out hover:scale-105"
                 >
                     <MicIcon className="w-8 h-8 text-white" />
@@ -1067,11 +1082,11 @@ const RecordingControls = React.memo(({
                 <p className="text-xs text-gray-400 mt-2">Tap to record</p>
             </div>
         )}
-
+        
         {recordingStatus === 'recording' && (
             <div className="text-center">
-                <button
-                    onClick={onStopRecording}
+                <button 
+                    onClick={onStopRecording} 
                     className="record-btn recording w-20 h-20 rounded-full flex items-center justify-center transition-all"
                 >
                     <StopIcon className="w-8 h-8 text-white" />
@@ -1082,31 +1097,31 @@ const RecordingControls = React.memo(({
                 <p className="text-xs text-gray-400">Recording... Tap to stop</p>
             </div>
         )}
-
+        
         {recordingStatus === 'reviewing' && (
             <div className="flex items-center gap-4">
-                <button
-                    onClick={onDiscardNote}
+                <button 
+                    onClick={onDiscardNote} 
                     className="bg-gray-600 hover:bg-gray-500 p-4 rounded-full transition-colors"
                     title="Discard recording"
                 >
                     <XIcon className="w-6 h-6 text-white"/>
                 </button>
-
+                
                 {lastRecordingUrl && (
                     <audio ref={reviewPlayerRef} src={lastRecordingUrl} />
                 )}
-
-                <button
-                    onClick={playReview}
+                
+                <button 
+                    onClick={playReview} 
                     className="bg-blue-600 hover:bg-blue-500 p-5 rounded-full transition-colors"
                     title="Preview recording"
                 >
                     <PlayIcon className="w-8 h-8 text-white"/>
                 </button>
-
-                <button
-                    onClick={onSendNote}
+                
+                <button 
+                    onClick={onSendNote} 
                     className="bg-green-600 hover:bg-green-500 p-4 rounded-full transition-colors"
                     title="Send recording"
                 >
@@ -1114,23 +1129,36 @@ const RecordingControls = React.memo(({
                 </button>
             </div>
         )}
-
+        
         {recordingStatus === 'processing' && (
             <div className="text-center">
                 <LoadingSpinner size="large" />
                 <p className="text-gray-400 mt-2">Processing voice effect...</p>
             </div>
         )}
-
+        
         {recordingStatus === 'sending' && (
             <div className="text-center">
                 <LoadingSpinner size="large" />
                 <p className="text-gray-400 mt-2">Sending voice note...</p>
+                {sendProgress && (
+                    <div className="mt-2">
+                        <div className="w-48 h-2 bg-gray-700 rounded-full overflow-hidden">
+                            <div 
+                                className="h-full bg-blue-500 transition-all duration-300"
+                                style={{ width: `${sendProgress.percentage}%` }}
+                            />
+                        </div>
+                        <p className="text-xs text-gray-500 mt-1">
+                            {sendProgress.sent}/{sendProgress.total} chunks
+                        </p>
+                    </div>
+                )}
             </div>
         )}
-
+        
         <style jsx>{`
-            .record-btn.idle {
+            .record-btn.idle { 
                 background: linear-gradient(135deg, #1e40af, #3b82f6);
                 box-shadow: 0 4px 20px rgba(59, 130, 246, 0.3);
             }
@@ -1202,8 +1230,8 @@ const VoiceOptions = React.memo(function VoiceOptions({ selectedVoice, setSelect
                     key={option.id}
                     onClick={() => setSelectedVoice(option.id)}
                     className={`voice-option cursor-pointer p-3 rounded-lg border-l-4 flex items-center justify-between transition-all ${
-                        selectedVoice === option.id
-                            ? 'selected bg-[#2a2a2a] border-blue-500 shadow-lg'
+                        selectedVoice === option.id 
+                            ? 'selected bg-[#2a2a2a] border-blue-500 shadow-lg' 
                             : 'border-transparent hover:bg-[#1a1a1a] hover:border-gray-600'
                     }`}
                 >
@@ -1254,7 +1282,7 @@ const ReadReceipt = ({ status }: { status: NoteStatus }) => {
 const LoadingSpinner = ({ size = 'medium' }: { size?: 'small' | 'medium' | 'large' }) => {
     const sizeClass = {
         small: 'w-4 h-4',
-        medium: 'w-6 h-6',
+        medium: 'w-6 h-6', 
         large: 'w-8 h-8'
     }[size];
 
@@ -1341,3 +1369,256 @@ const WifiOffIcon = (props: SVGProps<SVGSVGElement>) => (
         <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 5.636L5.636 18.364m12.728 0L5.636 5.636m12.728 12.728A9 9 0 105.636 5.636a9 9 0 0012.728 12.728z" />
     </svg>
 );
+
+const CopyIcon = (props: SVGProps<SVGSVGElement>) => (
+    <svg fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" />
+        <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+    </svg>
+);Packet({ type: 'status-update', noteId: newNote.id, status: 'delivered' });
+            
+            console.log(`Successfully processed audio ${noteId} with ${chunks.length} chunks`);
+        } catch (error) {
+            console.error(`Error processing audio ${noteId}:`, error);
+            showNotification('Failed to process voice note');
+        }
+    }, [broadcastPacket, showNotification]);
+    
+    useEffect(() => {
+        if (!room) return;
+        
+        const handleParticipantUpdate = () => {
+            setParticipants([room.localParticipant, ...Array.from(room.remoteParticipants.values())]);
+        };
+        
+        const handleParticipantConnected = (participant: Participant) => {
+            showNotification(`${participant.identity} joined`);
+            handleParticipantUpdate();
+        };
+        
+        const handleParticipantDisconnected = (participant: Participant) => {
+            showNotification(`${participant.identity} left`);
+            handleParticipantUpdate();
+            setRecordingParticipants(prev => {
+                const newState = { ...prev };
+                delete newState[participant.identity];
+                return newState;
+            });
+        };
+
+        const handleDataReceived = async (payload: Uint8Array, participant?: Participant) => {
+            if (!participant) return;
+            
+            try {
+                const packet = JSON.parse(new TextDecoder().decode(payload)) as Packet;
+                
+                switch (packet.type) {
+                    case 'voice-chunk':
+                        if (!receivedChunksRef.current[packet.noteId]) {
+                            receivedChunksRef.current[packet.noteId] = new Array(packet.total).fill(null);
+                        }
+                        receivedChunksRef.current[packet.noteId][packet.index] = packet.chunk;
+                        
+                        // Send acknowledgment
+                        broadcastPacket({
+                            type: 'chunk-ack',
+                            noteId: packet.noteId,
+                            index: packet.index,
+                            from: room.localParticipant.identity
+                        });
+                        
+                        // Debug: Log chunk reception
+                        const received = receivedChunksRef.current[packet.noteId].filter(c => c !== null).length;
+                        console.log(`Chunk ${packet.index + 1}/${packet.total} received for ${packet.noteId} (${received}/${packet.total})`);
+                        
+                        // Check if we have a pending note and all chunks are received
+                        const pendingNote = pendingNotesRef.current[packet.noteId];
+                        if (pendingNote && received === packet.total) {
+                            // Process the complete audio
+                            processCompleteAudio(packet.noteId, pendingNote.participant, pendingNote.duration);
+                        }
+                        break;
+                        
+                    case 'voice-end':
+                        const chunks = receivedChunksRef.current[packet.noteId];
+                        const receivedCount = chunks ? chunks.filter(c => c !== null).length : 0;
+                        
+                        console.log(`Voice-end received for ${packet.noteId}: ${receivedCount}/${packet.totalChunks} chunks received`);
+                        
+                        if (chunks && receivedCount === packet.totalChunks) {
+                            // All chunks already received, process immediately
+                            processCompleteAudio(packet.noteId, participant, packet.duration);
+                        } else {
+                            // Store pending note info to process when all chunks arrive
+                            pendingNotesRef.current[packet.noteId] = {
+                                totalChunks: packet.totalChunks,
+                                effectId: packet.effectId,
+                                duration: packet.duration,
+                                participant: participant
+                            };
+                            
+                            // Request missing chunks if any
+                            if (chunks) {
+                                const missingIndices: number[] = [];
+                                for (let i = 0; i < packet.totalChunks; i++) {
+                                    if (!chunks[i] || chunks[i] === null) {
+                                        missingIndices.push(i);
+                                    }
+                                }
+                                
+                                if (missingIndices.length > 0) {
+                                    console.log(`Requesting ${missingIndices.length} missing chunks for ${packet.noteId}`);
+                                    broadcastPacket({
+                                        type: 'request-chunks',
+                                        noteId: packet.noteId,
+                                        missingIndices
+                                    });
+                                }
+                            } else {
+                                // Initialize chunks array if it doesn't exist
+                                receivedChunksRef.current[packet.noteId] = new Array(packet.totalChunks).fill(null);
+                                
+                                // Request all chunks
+                                const allIndices = Array.from({ length: packet.totalChunks }, (_, i) => i);
+                                broadcastPacket({
+                                    type: 'request-chunks',
+                                    noteId: packet.noteId,
+                                    missingIndices: allIndices
+                                });
+                            }
+                            
+                            // Set a timeout to handle missing chunks
+                            setTimeout(() => {
+                                const finalChunks = receivedChunksRef.current[packet.noteId];
+                                const finalCount = finalChunks ? finalChunks.filter(c => c !== null).length : 0;
+                                if (finalCount < packet.totalChunks) {
+                                    console.error(`Timeout: Only received ${finalCount}/${packet.totalChunks} chunks for ${packet.noteId}`);
+                                    // Clean up
+                                    delete receivedChunksRef.current[packet.noteId];
+                                    delete pendingNotesRef.current[packet.noteId];
+                                    showNotification('Voice note reception incomplete. Please try again.');
+                                }
+                            }, 5000); // 5 second timeout
+                        }
+                        break;
+                        
+                    case 'status':
+                        setRecordingParticipants(prev => ({
+                            ...prev,
+                            [participant.identity]: packet.status === 'recording'
+                        }));
+                        break;
+                        
+                    case 'delete-note':
+                        setVoiceNotes(prev => prev.filter(note => note.id !== packet.noteId));
+                        break;
+                        
+                    case 'status-update':
+                        setVoiceNotes(prev => prev.map(note => 
+                            note.id === packet.noteId ? { ...note, status: packet.status } : note
+                        ));
+                        break;
+                        
+                    case 'request-chunks':
+                        // Handle request for missing chunks
+                        console.log(`Received request for missing chunks: ${packet.missingIndices.join(', ')}`);
+                        const savedChunks = sentChunksRef.current[packet.noteId];
+                        if (savedChunks) {
+                            for (const index of packet.missingIndices) {
+                                if (savedChunks[index]) {
+                                    broadcastPacket({
+                                        type: 'chunk-resend',
+                                        noteId: packet.noteId,
+                                        chunk: savedChunks[index],
+                                        index
+                                    });
+                                }
+                            }
+                        }
+                        break;
+                        
+                    case 'chunk-ack':
+                        // Handle chunk acknowledgment
+                        if (!chunkAcksRef.current[packet.noteId]) {
+                            chunkAcksRef.current[packet.noteId] = new Set();
+                        }
+                        chunkAcksRef.current[packet.noteId].add(packet.index);
+                        console.log(`Received ACK for chunk ${packet.index} of ${packet.noteId} from ${packet.from}`);
+                        break;
+                        
+                    case 'chunk-resend':
+                        // Handle resent chunk
+                        if (receivedChunksRef.current[packet.noteId]) {
+                            receivedChunksRef.current[packet.noteId][packet.index] = packet.chunk;
+                            console.log(`Received resent chunk ${packet.index} for ${packet.noteId}`);
+                            
+                            // Send acknowledgment for resent chunk
+                            broadcastPacket({
+                                type: 'chunk-ack',
+                                noteId: packet.noteId,
+                                index: packet.index,
+                                from: room.localParticipant.identity
+                            });
+                            
+                            // Check if all chunks are now complete
+                            const pendingNote = pendingNotesRef.current[packet.noteId];
+                            if (pendingNote) {
+                                const chunks = receivedChunksRef.current[packet.noteId];
+                                const received = chunks.filter(c => c !== null).length;
+                                if (received === pendingNote.totalChunks) {
+                                    processCompleteAudio(packet.noteId, pendingNote.participant, pendingNote.duration);
+                                }
+                            }
+                        }
+                        break;
+                }
+            } catch (error) {
+                console.error('Error processing received data:', error);
+            }
+        };
+
+        const handleConnectionStateChanged = (state: ConnectionState) => {
+            switch (state) {
+                case ConnectionState.Connected:
+                    setConnectionStatus('connected');
+                    break;
+                case ConnectionState.Connecting:
+                    setConnectionStatus('connecting');
+                    break;
+                case ConnectionState.Disconnected:
+                    setConnectionStatus('disconnected');
+                    showNotification('Disconnected from room');
+                    break;
+            }
+        };
+
+        handleParticipantUpdate();
+        room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
+        room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
+        room.on(RoomEvent.DataReceived, handleDataReceived);
+        room.on(RoomEvent.ConnectionStateChanged, handleConnectionStateChanged);
+
+        return () => {
+            room.off(RoomEvent.ParticipantConnected, handleParticipantConnected);
+            room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
+            room.off(RoomEvent.DataReceived, handleDataReceived);
+            room.off(RoomEvent.ConnectionStateChanged, handleConnectionStateChanged);
+        };
+    }, [room, broadcastPacket, showNotification, processCompleteAudio]);
+    
+    const handleStartRecording = useCallback(async () => {
+        const success = await startRecording();
+        if (success) {
+            broadcastPacket({ type: 'status', status: 'recording' });
+        } else {
+            showNotification('Failed to start recording. Please check microphone permissions.');
+        }
+    }, [startRecording, broadcastPacket, showNotification]);
+
+    const handleStopRecording = useCallback(async () => {
+        const audioBlob = await stopRecording();
+        if (audioBlob) {
+            const audioUrl = URL.createObjectURL(audioBlob);
+            setLastRecording({ blob: audioBlob, url: audioUrl });
+        }
+        broadcast
